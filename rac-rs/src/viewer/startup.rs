@@ -100,6 +100,7 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		smooth: Default::default(),
 		pose_stamp: None,
 		hero_cache: None,
+		ragdoll: Default::default(),
 		wrench: None,
 		wrench_axis: None,
 		wrench_rig: None,

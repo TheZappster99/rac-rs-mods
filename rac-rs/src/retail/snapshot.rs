@@ -389,6 +389,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 					out.parts.hero_fx = joint_records(m, a);
 					hero_addr = a;
 					(out.parts.strafe, out.parts.pose_ops, out.parts.follow) = mod_poses(m, a, out.scene);
+					out.parts.ragdoll = crate::retail::ragdoll::current();
 					out.parts.layers = layer_list(m, a);
 					out.parts.from_frame = snapshot_frame(m, a);
 					out.hero_tilt = [m.rdf(a + 0x40), m.rdf(a + 0x44)];

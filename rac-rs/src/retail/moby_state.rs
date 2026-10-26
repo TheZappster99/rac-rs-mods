@@ -266,6 +266,8 @@ pub struct HeroParts {
 	pub follow: Vec<crate::omni::FollowRec>,
 	/// Modern-controls torso twist / backpedal of this field (strafe.rs; default = none).
 	pub strafe: strafe::Draw,
+	/// Ragdoll Ratchet's phase of this field (ragdoll.rs; default = off). Picture only.
+	pub ragdoll: crate::retail::ragdoll::Cue,
 	/// The hero +0x60 weighted layers (gadget / weapon hold arms) in chain order (`layer_list`).
 	pub layers: Vec<crate::anim::ListLayer>,
 	pub clank_fx: Vec<crate::anim::JointFx>,

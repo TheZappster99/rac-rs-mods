@@ -71,6 +71,7 @@ mod hudsharp;
 mod heroanim;
 mod smooth;
 mod herocache; mod follow;
+mod ragdoll;
 mod gpucache;
 mod tiegpu;
 mod interp;
@@ -1559,6 +1560,8 @@ struct App {
 	pose_stamp: Option<(u32, usize, usize)>,
 	/// PC perf (lane A B1): the hero's posed bundle of the last tick (viewer/herocache.rs).
 	hero_cache: Option<herocache::HeroCache>,
+	/// Ragdoll Ratchet's limp body (viewer/ragdoll.rs): steps once per game field while the game's Ratchet is limp.
+	ragdoll: ragdoll::Ragdoll,
 	/// The wrench in Ratchet's hand: its vertices and normals in his wrist joint's frame.
 	wrench: Option<Posed>,
 	/// Wrench joints 0 and 1 in the held pose, in the wrist frame (the hit sweep's endpoints, FUN_00259918).

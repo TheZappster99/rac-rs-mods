@@ -797,8 +797,13 @@ pub fn pose_fix(d: Draw, anim: &crate::anim::Animated, drawn: &[[f32; 12]], logi
 	if (d == Draw::default() && !clock_custom()) || drawn.len() < 111 {
 		return None;
 	}
-	let logic = logic();
-	if logic.len() != drawn.len() {
+	pose_fix_between(anim, drawn, &logic())
+}
+
+/// The `PoseFix` from retail's pose `logic` onto any drawn pose `drawn` (also Ragdoll Ratchet's limp body, viewer/ragdoll.rs, so
+/// Clank and the packs stay on it).
+pub fn pose_fix_between(anim: &crate::anim::Animated, drawn: &[[f32; 12]], logic: &[[f32; 12]]) -> Option<PoseFix> {
+	if drawn.len() < 111 || logic.len() != drawn.len() {
 		return None;
 	}
 	let moves = |js: &mut dyn Iterator<Item = usize>| -> Vec<([f32; 3], [f32; 12])> {

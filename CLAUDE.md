@@ -110,6 +110,9 @@ text ids `0x7fc0..0x8000` (our `titlequit.rs` Quit Game row uses `BASE+0xE000..0
 the "Ray-traced shadows" built-in mod (`rt-shadows`) or `RAC_RT_SHADOWS=1`, Vulkan + `EXPERIMENTAL_RAY_QUERY` only). Read it before touching shadows. `build\release\rac-rs.orig.exe`
 is the untouched exe kept for A/B comparison.
 
+`RAGDOLL_PLAN.md` describes the Ragdoll Ratchet built-in mod (`ragdoll-ratchet`: `retail/ragdoll.rs` worker, `viewer/ragdoll.rs`
+renderer, forced on with `RAC_RAGDOLL=1`). Its "Progress so far" section is the hand-off: what works, the approved tuning, what is next.
+
 ## Updating from upstream
 
 This folder (`F:\Games\Ratchet and Clank Remastered`, the RAC-RS Launcher's install) is the dev copy: branch `mods-migration` = our

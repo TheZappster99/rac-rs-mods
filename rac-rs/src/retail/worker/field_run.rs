@@ -42,6 +42,8 @@ impl Worker {
 			modcam::pre_field(&mut m, &fin2);
 			strafe::pre_field(&mut m, &fin2);
 			aim::pre_field(&mut m, &fin2);
+			// Ragdoll Ratchet (ragdoll.rs) locks this pad while Ratchet is limp, so it needs it before the built-in mods run.
+			crate::retail::ragdoll::note_pad(fin.buttons, pad_sticks);
 			// The built-in mods that are on and work per field (plugins.rs).
 			crate::plugins::pre_field(&mut m);
 			// Ragdoll Ratchet measuring log (ragdoll.rs): inert unless RAC_RAGDOLL_LOG is set.

@@ -90,8 +90,39 @@ impl Plugin for RtSunRays {
 	}
 }
 
+/// Ragdoll Ratchet (retail/ragdoll.rs, viewer/ragdoll.rs; RAGDOLL_PLAN.md): a big fall, or L3 in the air, makes Ratchet go limp
+/// and flop; he gets up after the limp time. Only the picture and the pad while he is limp change.
+struct RagdollRatchet;
+
+impl Plugin for RagdollRatchet {
+	fn id(&self) -> &'static str {
+		crate::retail::ragdoll::ID
+	}
+	fn name(&self) -> &'static str {
+		"Ragdoll Ratchet"
+	}
+	fn description(&self) -> &'static str {
+		"Ratchet goes limp and flops when he falls from a big height without the Heli-Pack, the Thruster-Pack or a wrench slam. Press L3 (Left Shift) in the air to go limp at once. You have no control until he gets up. Built into the game."
+	}
+	fn env_force(&self) -> Option<&'static str> {
+		Some("RAC_RAGDOLL")
+	}
+	fn settings(&self) -> &'static [Setting] {
+		&[
+			Setting { id: "height", name: "Fall height", values: &["Low", "Medium", "High"], default: 1 },
+			Setting { id: "button", name: "Ragdoll button", values: &["Off", "L3"], default: 1 },
+			Setting { id: "time", name: "Limp time", values: &["Short", "Medium", "Long"], default: 1 },
+			Setting { id: "flop", name: "Floppiness", values: &["Stiff", "Loose", "Noodle"], default: 1 },
+			Setting { id: "bounce", name: "Bounciness", values: &["Off", "Some", "Lots"], default: 1 },
+		]
+	}
+	fn pre_field(&self, m: &mut ee_oracle::Machine) {
+		crate::retail::ragdoll::pre_field(m);
+	}
+}
+
 /// Every built-in mod, in menu order. A new one is a type implementing `Plugin` and one entry here.
-static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays];
+static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays, &RagdollRatchet];
 
 // ---- state ------------------------------------------------------------------------------------------------------------------
 
@@ -193,7 +224,6 @@ pub fn on_at_start(id: &str) -> bool {
 }
 
 /// The value setting `setting_id` of mod `id` had when the game started (index into its `values`); 0 when either is unknown.
-#[allow(dead_code)] // No built-in mod with settings in this build yet.
 pub fn value_at_start(id: &str, setting_id: &str) -> u8 {
 	let Some(i) = index(id) else { return 0 };
 	PLUGINS[i].settings().iter().position(|s| s.id == setting_id).map_or(0, |k| state().values[i][k])

@@ -1,6 +1,11 @@
-//! [PC] Ragdoll Ratchet (RAGDOLL_PLAN.md), phase 0: measuring only. Nothing here writes game memory or changes the pad.
+//! [PC] Ragdoll Ratchet (RAGDOLL_PLAN.md), the worker half: the built-in mod `ragdoll-ratchet` (plugins.rs) and its measuring tools.
 //!
-//! `RAC_RAGDOLL_LOG=1` writes `ragdoll:` lines to the run log while a level runs:
+//! The mod: a big fall that no Heli-Pack, Thruster-Pack or wrench slam broke, or L3 in the air, makes Ratchet go limp. Each field
+//! `pre_field` tracks the fall from RAM, runs the phases and, while he is limp, hands the game a pad with only Start and the
+//! camera stick (the game's Ratchet then lands and stands where he is). The phase reaches the renderer as `HeroParts.ragdoll`
+//! (`current`), where viewer/ragdoll.rs draws the limp body. Nothing else is written, and with the mod off nothing runs.
+//!
+//! The measuring tools only read and log. `RAC_RAGDOLL_LOG=1` writes `ragdoll:` lines to the run log while a level runs:
 //! - `state`: every change of the hero state, its group or the airborne flag, with the height and vertical speed. This finds the
 //!   Heli-Pack hover state and confirms the wrench slam's state (try each pack and the slam, then read the states of that fall).
 //! - `fall`: one line per landing after at least `MIN_AIR` airborne fields: take-off, apex and landing heights, the drop
@@ -28,6 +33,221 @@ const GAME_MODE: u32 = 0x15f5a4;
 const MIN_AIR: u32 = 10;
 /// A height change bigger than this in one field is a respawn or a teleport (modcam.rs `JUMP`): the fall being tracked is dropped.
 const JUMP: f32 = 8.0;
+
+// ---- the mod --------------------------------------------------------------------------------------------------------------
+
+/// The mod id (plugins.rs).
+pub const ID: &str = "ragdoll-ratchet";
+
+/// Pad bits of `Machine::set_pad`'s word (measured, RAGDOLL_PLAN.md "Phase 0 results").
+const PAD_L3: u16 = 0x200;
+const PAD_START: u16 = 0x800;
+/// States that break a fall: Heli-Pack glide, Thruster-Pack, wrench slam.
+const SAVE_STATES: [u32; 3] = [0x8, 0x10, 0x14];
+/// Hurt states (an enemy hit, lava): retail already throws him, so that fall does not count.
+const HURT_STATES: [u32; 2] = [0x16, 0x3c];
+/// Ledge grab / hang: the fall starts again from the ledge.
+const LEDGE_GROUP: u32 = 3;
+/// Game modes that only pause the ragdoll (a menu, the map): everything else but gameplay (0) ends it.
+const MENU_MODES: [u32; 2] = [1, 3];
+const GETUP_S: f32 = 0.6;
+
+/// States that end a ragdoll at once: water, mud, the Swingshot, the ship / turret and the grind.
+fn cancel_state(s: u32) -> bool {
+	matches!(s, 0x33..=0x37 | 0x6a | 0x75 | 0x76 | 0x68 | 0x7b | 0x24..=0x26 | 0x2c | 0x32 | 0x74)
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Phase {
+	#[default]
+	Off,
+	/// Limp in the air (L3); becomes `Ground` on the landing.
+	Fall,
+	/// Limp on the ground for the limp time.
+	Ground,
+	/// Blending back to the game's pose (`Cue::blend`).
+	GetUp,
+}
+
+/// What the renderer needs of the ragdoll this field.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Cue {
+	/// One per ragdoll: a new id starts a new body.
+	pub id: u32,
+	pub phase: Phase,
+	/// Get-up progress, 0 = all ragdoll, 1 = all the game's pose.
+	pub blend: f32,
+	/// A menu is up: the body holds still.
+	pub frozen: bool,
+	/// Floppiness setting (0 Stiff, 1 Loose, 2 Noodle).
+	pub flop: u8,
+	/// Bounciness setting (0 Off, 1 Some, 2 Lots).
+	pub bounce: u8,
+	/// A ragdoll started by a landing: his speed in the last field in the air (units/s, world). By the field the landing is seen,
+	/// retail has already stopped him, so the drawn pose alone starts the body at rest: no impact, no bounce.
+	pub impact: Option<[f32; 3]>,
+	/// Counts the fields the worker ran the mod for (not the menus): the renderer steps the body once per new value. Its own field
+	/// count runs on in the pause menu, where this cue is not renewed, and the body went on falling and settling behind the menu.
+	pub tick: u32,
+}
+
+/// The fall being tracked.
+#[derive(Clone, Copy)]
+struct Track {
+	apex: f32,
+	/// False once a save or hurt state was seen.
+	counts: bool,
+	fields: u32,
+	/// His speed in the latest airborne field.
+	vel: [f32; 3],
+}
+
+#[derive(Default)]
+struct Mod {
+	/// This field's pad, as `set_pad` got it (`note_pad`).
+	buttons: u16,
+	sticks: [u8; 4],
+	last_buttons: u16,
+	last_pos: Option<[f32; 3]>,
+	air: Option<Track>,
+	/// The impact speed of the ragdoll running now (`Cue::impact`).
+	impact: Option<[f32; 3]>,
+	tick: u32,
+	phase: Phase,
+	/// Fields in the phase.
+	t: u32,
+	id: u32,
+	cue: Cue,
+}
+
+static MOD: Mutex<Option<Mod>> = Mutex::new(None);
+
+fn setting(key: &str) -> u8 {
+	crate::plugins::value_at_start(ID, key)
+}
+
+/// Worker, each gameplay field before the built-in mods run: the pad `set_pad` just got (the mod's `pre_field` has no `FieldIn`).
+pub fn note_pad(buttons: u16, sticks: [u8; 4]) {
+	if !crate::plugins::on_at_start(ID) {
+		return;
+	}
+	let mut g = MOD.lock().unwrap();
+	let s = g.get_or_insert_with(Mod::default);
+	s.buttons = buttons;
+	s.sticks = sticks;
+}
+
+/// The ragdoll of the field that just ran (retail/snapshot.rs puts it in `HeroParts`); `Off` with the mod off.
+pub fn current() -> Cue {
+	MOD.lock().ok().and_then(|g| g.as_ref().map(|s| s.cue)).unwrap_or_default()
+}
+
+/// The mod's `pre_field` (plugins.rs): the phases, and the pad lock while limp.
+pub fn pre_field(m: &mut Machine) {
+	let dt = super::disc::field_dt();
+	let height = [6.0, 8.0, 12.0][setting("height").min(2) as usize];
+	let button = setting("button") == 1;
+	let limp = ([1.5, 3.0, 5.0][setting("time").min(2) as usize] / dt).round() as u32;
+	let getup = (GETUP_S / dt).round() as u32;
+	let flop = setting("flop").min(2);
+	let bounce = setting("bounce").min(2);
+
+	let mut g = MOD.lock().unwrap();
+	let s = g.get_or_insert_with(Mod::default);
+	let pressed = s.buttons & !s.last_buttons;
+	s.last_buttons = s.buttons;
+
+	let mode = m.rd32(va(GAME_MODE));
+	let form = m.rd8(BODY_FORM);
+	let health = m.rd32(HEALTH) as i32;
+	let state = m.rd32(HERO_STATE);
+	let group = m.rd32(HERO_GROUP);
+	let airborne = m.rd16(HERO_AIRBORNE) != 0;
+	let pos = m.rdv3(HERO_POS);
+	let z = pos[2];
+	let moved = s.last_pos.map(|p0| [pos[0] - p0[0], pos[1] - p0[1], pos[2] - p0[2]]);
+	let teleport = moved.is_some_and(|d| d.iter().any(|v| v.abs() > JUMP));
+	let vel = moved.filter(|_| !teleport).map_or([0.0; 3], |d| d.map(|v| v / dt));
+	s.last_pos = Some(pos);
+	let old = s.phase;
+
+	if MENU_MODES.contains(&mode) && s.phase != Phase::Off {
+		// A menu: hold everything as it is (the menu needs its buttons, so no lock).
+		s.cue.frozen = true;
+		return;
+	}
+	s.tick = s.tick.wrapping_add(1);
+	if mode != 0 || form != 0 || health <= 0 || teleport || cancel_state(state) {
+		s.phase = Phase::Off;
+		s.air = None;
+	} else {
+		match s.phase {
+			Phase::Off => {
+				if airborne {
+					let tr = s.air.get_or_insert(Track { apex: z, counts: true, fields: 0, vel });
+					tr.fields += 1;
+					tr.vel = vel;
+					tr.apex = if group == LEDGE_GROUP { z } else { tr.apex.max(z) };
+					if SAVE_STATES.contains(&state) || HURT_STATES.contains(&state) {
+						tr.counts = false;
+					}
+					if button && pressed & PAD_L3 != 0 && tr.fields >= 2 && !SAVE_STATES.contains(&state) {
+						s.phase = Phase::Fall;
+					}
+				} else if let Some(tr) = s.air.take() {
+					if tr.counts && tr.apex - z >= height {
+						s.phase = Phase::Ground;
+						s.impact = Some(tr.vel);
+					}
+					if log_on() {
+						eprintln!("ragdoll: landed drop {:.2} counts {} -> {}", tr.apex - z, tr.counts, if s.phase == Phase::Ground { "limp" } else { "no ragdoll" });
+					}
+				}
+				if s.phase == Phase::Fall {
+					// Limp in the air: the drawn pose is still moving, the body takes its speed from it.
+					s.impact = None;
+				}
+				if s.phase != Phase::Off {
+					s.id = s.id.wrapping_add(1);
+					s.air = None;
+				}
+			}
+			Phase::Fall => {
+				if !airborne {
+					s.phase = Phase::Ground;
+				}
+			}
+			Phase::Ground => {
+				if airborne {
+					// Slid off a ledge while limp: limp in the air again.
+					s.phase = Phase::Fall;
+				} else if s.t >= limp {
+					s.phase = Phase::GetUp;
+				}
+			}
+			Phase::GetUp => {
+				if s.t >= getup {
+					s.phase = Phase::Off;
+				}
+			}
+		}
+	}
+	if s.phase != old {
+		s.t = 0;
+		if log_on() {
+			eprintln!("ragdoll: phase {old:?} -> {:?} (id {}, state {state:#x}, mode {mode}, z {z:.2})", s.phase, s.id);
+		}
+	}
+	s.t += 1;
+	if s.phase != Phase::Off {
+		// Only Start (pause) and the camera stick reach the game while he is limp.
+		m.set_pad(s.buttons & PAD_START, [s.sticks[0], s.sticks[1], 0x80, 0x80]);
+	}
+	let blend = if s.phase == Phase::GetUp { (s.t as f32 / getup.max(1) as f32).min(1.0) } else { 0.0 };
+	s.cue = Cue { id: s.id, phase: s.phase, blend, frozen: false, flop, bounce, impact: s.impact, tick: s.tick };
+}
+
+// ---- the measuring tools ----------------------------------------------------------------------------------------------------
 
 /// 0 = off, 1 = state / fall / pad / mode lines, 2 = also a line per airborne field.
 fn level() -> u8 {

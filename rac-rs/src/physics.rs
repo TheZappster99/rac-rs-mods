@@ -219,6 +219,52 @@ impl World {
 
 
 
+	/// [PC] The face ids `nearest_among` / `ground_among` test for anything inside the box `lo`..`hi`: one lookup for many queries
+	/// in the same place (viewer/ragdoll.rs gathers them once per field for the whole limp body).
+	pub fn ids_in_box(&self, lo: V3, hi: V3) -> Vec<u32> {
+		self.within(lo, hi)
+	}
+
+	/// `nearest` over the faces `ids` only (from `ids_in_box` of a box holding the query).
+	pub fn nearest_among(&self, ids: &[u32], base: V3, h: f32, r: f32, mut best: f32, mask: u32) -> Option<Overlap> {
+		let mut out: Option<Overlap> = None;
+		for &id in ids {
+			let t = &self.tris[id as usize];
+			if let Some(o) = face_overlap(&t.retail(), t.kind, base, h, r, best, mask) {
+				best = o.best;
+				out = Some(o);
+			}
+		}
+		out
+	}
+
+	/// `ground` over the faces `ids` only (water faces skipped): the highest up-facing surface at or below `from`, within `max`.
+	pub fn ground_among(&self, ids: &[u32], from: V3, max: f32) -> Option<f32> {
+		let mut best: Option<f32> = None;
+		for &id in ids {
+			let t = &self.tris[id as usize];
+			if t.surface() == 0 || t.n[2] < 0.1 {
+				continue;
+			}
+			let [a, b, c] = t.v;
+			let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+			if d.abs() < 1e-12 {
+				continue;
+			}
+			let l1 = ((b[1] - c[1]) * (from[0] - c[0]) + (c[0] - b[0]) * (from[1] - c[1])) / d;
+			let l2 = ((c[1] - a[1]) * (from[0] - c[0]) + (a[0] - c[0]) * (from[1] - c[1])) / d;
+			let l3 = 1.0 - l1 - l2;
+			if l1 < 0.0 || l2 < 0.0 || l3 < 0.0 {
+				continue;
+			}
+			let z = l1 * a[2] + l2 * b[2] + l3 * c[2];
+			if z <= from[2] && from[2] - z <= max && best.is_none_or(|bz| z > bz) {
+				best = Some(z);
+			}
+		}
+		best
+	}
+
 	/// Pushes a sphere out of the terrain with up to eight sphere queries (mask 0, as a bare FUN_001f0ce0 loop).
 	/// Returns the new centre and whether a face with normal z >= `walkable` was touched.
 	pub fn push_sphere(&self, centre: V3, radius: f32, walkable: f32) -> (V3, bool) {

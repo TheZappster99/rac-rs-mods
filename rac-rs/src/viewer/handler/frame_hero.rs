@@ -63,10 +63,20 @@ impl App {
 				let (hero_fx, throw_pose, layer1_pose, hold_poses) = hero_layers(rparts, &game.player, &a.slot_map);
 				let mut mats = self.hero_rig.hero.pose_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses);
 				// Modern controls (retail/strafe.rs): the legs twist toward the ground path while aiming (off = zero twist); retail's parts follow (`strafe_fix`).
+				let mut ragdoll_logic = None;
 				if let Some(q) = rparts {
-					crate::retail::strafe::twist_mats(&mut mats, a, q.strafe.twist); follow::capture(&q.follow, mats.len(), |j| norm_cols(a.joint_world(&mats, j)));
+					crate::retail::strafe::twist_mats(&mut mats, a, q.strafe.twist);
+					// Ragdoll Ratchet (viewer/ragdoll.rs): while he is limp the ragdoll's body replaces the pose; off = untouched.
+					let place = crate::viewer::ragdoll::Place { pos: p.pos, rows: hero_rows(p) };
+					ragdoll_logic = self.ragdoll.apply(&mut mats, a, q.ragdoll, place, w);
+					follow::capture(&q.follow, mats.len(), |j| norm_cols(a.joint_world(&mats, j)));
 				}
-				self.smooth.set_pose_fix(rparts.and_then(|q| strafe_fix(&self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats)));
+				// Clank, the packs and the head items retail hangs on its own pose follow the drawn one: the limp body, or the strafe draw.
+				let fix = match &ragdoll_logic {
+					Some(logic) => crate::retail::strafe::pose_fix_between(a, &mats, logic),
+					None => rparts.and_then(|q| strafe_fix(&self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats)),
+				};
+				self.smooth.set_pose_fix(fix);
 				// HELD-GLOVE: a glove in hand (FUN_0020d018) is posed from the hero's own live local joints, not its clock.
 				let hand_copy = crate::inventory::hand_pose_copy(game.inv.equipped);
 				let hero_local = if hand_copy { self.hero_rig.hero.local_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses) } else { Vec::new() };
