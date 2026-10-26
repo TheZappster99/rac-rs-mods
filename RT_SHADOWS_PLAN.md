@@ -1,7 +1,7 @@
 # Ray-traced sun shadows: prototype scope
 
-Status: phases 0-3, 5 (soft shadows) and 6 (foliage) built and tested in game (2026-10-25). Code in `rac-rs/src/viewer/rtshadow.rs`; off unless
-`RAC_RT_SHADOWS=1`. Not committed yet (the git baseline is commit `d19b540`).
+Status: phases 0-6 (moving casters, soft shadows, foliage) built and tested in game (2026-10-25). Code in `rac-rs/src/viewer/rtshadow.rs`; off unless
+`RAC_RT_SHADOWS=1` or the Ray-traced shadows plugin. Committed on the `plugins` branch.
 
 ## Prototype results (Kerwan, RTX 3080 Ti, Vulkan)
 
@@ -27,7 +27,13 @@ Status: phases 0-3, 5 (soft shadows) and 6 (foliage) built and tested in game (2
   four rays per fragment; terrace 155 FPS (6.5 ms) with the mask, vs 85 (12.1 ms) four rays per fragment.
 - Dev knob: `RAC_RT_TUNE=<file>` with `cut=tfrag,tie,shrub solid=1.0` picks which casters get the texel test; the game re-reads
   the file while running and rebuilds the structure.
-- Expected gaps: Ratchet, enemies and other mobies cast no shadow while tracing (phase 4).
+- **Moving casters (phase 4, done 2026-10-25, `rtmovers.rs`):** every frame, the shown props and scene actors within 80 units
+  of the eye are posed on the CPU (gpuskin.rs `emulate_pos`, the props shader's own maths) and go into a bottom-level structure
+  of their own with the player, the clipped props and the debris, in the top level's slot 1. Kerwan spawn: 35 to 39 slots
+  (about 18k triangles) plus 57k other triangles, 0.35 ms CPU per frame; 6.3 ms frame without, 6.9 ms with. Checked with
+  `world=0` in RAC_RT_TUNE (only the movers cast): Ratchet casts his shape on the grass and shades his own back. The shadow mask
+  is last frame's, so a moving shadow lags one frame. Props past 80 units cast nothing.
+- Dev keys in RAC_RT_TUNE: `movers=0` (no moving casters), `world=0` (only the moving casters).
 - Testing note: `cargo test -p rac-rs --lib` builds a 2.18 GB debug test exe that Windows refuses to run (over 2 GB). That
   predates this work. The traced shader was checked with naga in a separate scratch crate instead.
 

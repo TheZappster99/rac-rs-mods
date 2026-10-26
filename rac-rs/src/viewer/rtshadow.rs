@@ -4,13 +4,15 @@
 //!
 //! - Casters: the level's static world in one bottom-level structure, built once per level from the batches' own vertex buffers
 //!   and a compact copy of the chosen index ranges: the merged world batch, terrain fragments with their near mesh, ties with
-//!   LOD 0 and the shrubs. Mobies and debris cast nothing yet.
+//!   LOD 0 and the shrubs. The things that move (mobies, the player, debris) are rtmovers.rs's, in the
+//!   top level's slot 1, rebuilt every frame.
 //! - Texel alpha: as the cascades cut them (sunshadow.rs `shrub_shader`), a terrain texel below alpha 0x60, a tie texel below
 //!   0x40 and a shrub texel below 0x30 casts nothing. A draw whose texture keeps every texel is opaque geometry; one that keeps
 //!   none is left out; the rest are non-opaque geometry whose triangles carry their uvs and a 1-bit mask of their texture
 //!   (`rt_tris`, `rt_bits`), so a ray takes a candidate hit only on a kept texel (vines and leaves cast their holes).
 //! - Soft shadows: after the level pass, `mask` traces `RAYS` rays over the sun's disc for every pixel of its depth into a
-//!   shadow mask, with the camera it used. The casters are static, so a world point's shadow holds from frame to frame.
+//!   shadow mask, with the camera it used. The static world's shadow at a world point holds from frame to frame; a moving caster's
+//!   shadow in the mask lags one frame.
 //! - Receivers: `sun_occ` (viewer.rs SHADER, rewritten by `shader`) projects its world point into the last frame's mask and
 //!   takes the mean of the 3x3 pixels whose depth matches; with fewer than 3 (off screen, newly revealed, a see-through layer in
 //!   front) it traces one ray of its own, out to `REACH`. Until the level's structure is built (`u.sun_q.w` 0) it reads the
@@ -29,12 +31,19 @@ const BITS_CAP: usize = 8 << 20;
 /// `rt_tris` header: the first cut triangle of each geometry (vec4 0 and 1); a triangle's record follows at 2 + 2 * index.
 const MAX_GEOS: usize = 8;
 
-/// Set once the device has ray queries and the switch is on (`enable`); batches created after it carry `usage`.
+/// Set once the device has ray queries and a ray-traced plugin is on (`enable`); batches created after it carry `usage`.
 static ON: AtomicBool = AtomicBool::new(false);
+/// Set with `ON` when the Ray-traced shadows plugin is the one on: the receivers trace (`shadows`).
+static SHADOWS: AtomicBool = AtomicBool::new(false);
 
 /// The Ray-traced shadows plugin (Pause -> Options -> Plugins, read at start-up; RAC_RT_SHADOWS=1 still forces it on).
-fn wanted() -> bool {
+fn wanted_shadows() -> bool {
 	crate::plugins::on_at_start("rt_shadows")
+}
+
+/// The level's structure is wanted by the shadows or by the sun rays (rtrays.rs).
+fn wanted() -> bool {
+	wanted_shadows() || super::rtrays::wanted()
 }
 
 /// The device features to request: ray queries when wanted and the adapter traces in hardware (Vulkan only in wgpu 30).
@@ -54,13 +63,20 @@ pub(super) fn features(adapter: &wgpu::Adapter) -> wgpu::Features {
 pub(super) fn enable(device: &wgpu::Device) {
 	let on = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
 	ON.store(on, Ordering::Relaxed);
+	SHADOWS.store(on && wanted_shadows(), Ordering::Relaxed);
 	if on {
-		eprintln!("rt shadows: on (hardware ray queries)");
+		eprintln!("rt shadows: {} (hardware ray queries)", if shadows() { "on" } else { "structure only, the shadows stay shadow maps" });
 	}
 }
 
+/// The device traces and the level's structure is built (for the shadows, the sun rays or both).
 pub(super) fn on() -> bool {
 	ON.load(Ordering::Relaxed)
+}
+
+/// The shadow receivers trace (the level shader variant, its bindings 3..7 and the shadow mask pass).
+pub(super) fn shadows() -> bool {
+	SHADOWS.load(Ordering::Relaxed)
 }
 
 /// Vertex and index buffers also feed the structure builds (and the index copies) while ray tracing is on.
@@ -73,7 +89,7 @@ pub(super) fn usage(u: wgpu::BufferUsages) -> wgpu::BufferUsages {
 
 /// The level's group-0 layout entries past the cascades (bindings 3..7), none while ray tracing is off.
 pub(super) fn layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
-	if !on() {
+	if !shadows() {
 		return Vec::new();
 	}
 	let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
@@ -95,8 +111,8 @@ fn mask_shader() -> String {
 	format!("enable wgpu_ray_query;\n{}{}", RT_MASK, rt_fns())
 }
 
-/// The ray code both shaders share, with this file's constants.
-fn rt_fns() -> String {
+/// The ray code the shaders share (these two and rtrays.rs's march), with this file's constants.
+pub(super) fn rt_fns() -> String {
 	RT_FNS.replace("REACH", &format!("{REACH:.1}")).replace("SUN_DISC", &format!("{SUN_DISC:.4}")).replace("RAYS", &format!("{RAYS}u"))
 }
 
@@ -280,17 +296,22 @@ impl Cut {
 }
 
 /// RAC_RT_TUNE=<file> (dev): `cut=tfrag,tie,shrub` (the kinds traced by texel alpha; a terrain or tie draw left out casts whole,
-/// a shrub left out casts nothing) and `solid=0.98` (a texture with at least that share of casting texels casts whole). The
-/// file is read again when it changes, and the level's structure rebuilt.
+/// a shrub left out casts nothing), `solid=0.98` (a texture with at least that share of casting texels casts whole) and
+/// `movers=0` (no moving casters, rtmovers.rs), `world=0` (debug: only the moving casters). The file is read again when
+/// it changes, and the level's structure rebuilt.
 #[derive(Clone, PartialEq, Debug)]
 struct Tune {
 	cut: [bool; 3],
 	solid: f32,
+	/// `movers=0` leaves the moving casters out (rtmovers.rs).
+	movers: bool,
+	/// `world=0` leaves the static world out (debug: only the movers cast).
+	world: bool,
 }
 
 impl Default for Tune {
 	fn default() -> Tune {
-		Tune { cut: [true; 3], solid: 1.0 }
+		Tune { cut: [true; 3], solid: 1.0, movers: true, world: true }
 	}
 }
 
@@ -301,6 +322,8 @@ impl Tune {
 			match w.split_once('=') {
 				Some(("cut", v)) => t.cut = ["tfrag", "tie", "shrub"].map(|k| v.split(',').any(|x| x == k)),
 				Some(("solid", v)) => t.solid = v.parse().unwrap_or(1.0),
+				Some(("movers", v)) => t.movers = v != "0",
+				Some(("world", v)) => t.world = v != "0",
 				_ => {}
 			}
 		}
@@ -403,6 +426,8 @@ pub(super) struct RtShadow {
 	mask_pipeline: wgpu::ComputePipeline,
 	/// The mask pass's bind group and the depth view it reads (a new window size makes a new depth target).
 	mask_bind: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+	/// Phase 4 (rtmovers.rs): the moving casters, rebuilt every frame into the top level's slot 1.
+	movers: super::rtmovers::RtMovers,
 }
 
 const IDENTITY: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -411,7 +436,7 @@ impl RtShadow {
 	/// The top level, built empty so the level's bind groups can hold it before any level loads, the alpha tables and the
 	/// shadow mask.
 	pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> RtShadow {
-		let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor { label: Some("rt shadows"), max_instances: 1, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
+		let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor { label: Some("rt shadows"), max_instances: 2, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
 		let table = |label, size: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		let (tris, bits, mask) = (table("rt shadow cut triangles", (2 + 2 * TRI_CAP) * 16), table("rt shadow masks", BITS_CAP * 4), table("rt shadow mask", MASK_CAP * 4));
 		let uniform = |label, extra| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: std::mem::size_of::<RtView>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | extra, mapped_at_creation: false });
@@ -421,7 +446,7 @@ impl RtShadow {
 		let mut enc = device.create_command_encoder(&Default::default());
 		enc.build_acceleration_structures(std::iter::empty(), std::iter::once(&tlas));
 		queue.submit([enc.finish()]);
-		RtShadow { tlas, tris, bits, blas: None, key: None, tune: Tune::default(), tune_seen: None, mask, view, view_next, mask_pipeline, mask_bind: None }
+		RtShadow { tlas, tris, bits, blas: None, key: None, tune: Tune::default(), tune_seen: None, mask, view, view_next, mask_pipeline, mask_bind: None, movers: Default::default() }
 	}
 
 	/// The frame's shadow mask, after the level pass (`depth` its depth, `cam` / `aspect` / `range` its camera, `dir` the light's
@@ -502,6 +527,34 @@ impl RtShadow {
 			wgpu::BindGroupEntry { binding: 6, resource: self.view.as_entire_binding() },
 			wgpu::BindGroupEntry { binding: 7, resource: self.mask.as_entire_binding() },
 		]
+	}
+
+	/// The structure and its texel-alpha tables at bindings 3, 4 and 5, for another pass that traces (rtrays.rs).
+	pub(super) fn trace_entries(&self) -> [wgpu::BindGroupEntry<'_>; 3] {
+		[
+			wgpu::BindGroupEntry { binding: 3, resource: self.tlas.as_binding() },
+			wgpu::BindGroupEntry { binding: 4, resource: self.tris.as_entire_binding() },
+			wgpu::BindGroupEntry { binding: 5, resource: self.bits.as_entire_binding() },
+		]
+	}
+
+	/// The level's structure is built (`ready` returned true for the current scene).
+	/// Phase 4 (rtmovers.rs): this frame's moving casters around `eye` in the top level's slot 1 (the static world is slot 0),
+	/// and the top level rebuilt (its own submit, ahead of the frame's). Nothing until the level's structure is built.
+	pub(super) fn movers(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, eye: [f32; 3]) {
+		if self.blas.is_none() {
+			return;
+		}
+		let blas = if self.tune.movers { self.movers.build(device, queue, scene, eye) } else { None };
+		self.tlas[0] = self.blas.as_ref().filter(|_| self.tune.world).map(|b| wgpu::TlasInstance::new(b, IDENTITY, 0, 0xff));
+		self.tlas[1] = blas.map(|b| wgpu::TlasInstance::new(b, IDENTITY, 1, 0xff));
+		let mut enc = device.create_command_encoder(&Default::default());
+		enc.build_acceleration_structures(std::iter::empty(), std::iter::once(&self.tlas));
+		queue.submit([enc.finish()]);
+	}
+
+	pub(super) fn built(&self) -> bool {
+		self.blas.is_some()
 	}
 
 	/// Builds the structure for `scene` when it is new (submits of its own, ahead of the frame's); true once it is built.

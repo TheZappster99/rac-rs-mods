@@ -86,8 +86,28 @@ impl Plugin for RtShadows {
 	}
 }
 
+/// Ray-traced sun rays (viewer/rtrays.rs): light shafts in the air, traced through the same structure as the shadows (either
+/// plugin brings it up), in place of the screen-space Sun rays. Lighting Enhanced, Dynamic shadows and Sun rays on; the Sun rays
+/// level picks how many samples each pixel takes. A restart plugin for the same reason as the shadows.
+struct RtSunRays;
+
+impl Plugin for RtSunRays {
+	fn id(&self) -> &'static str {
+		"rt_sun_rays"
+	}
+	fn name(&self) -> &'static str {
+		"Ray-traced sun rays"
+	}
+	fn needs_restart(&self) -> bool {
+		true
+	}
+	fn env_force(&self) -> Option<&'static str> {
+		Some("RAC_RT_RAYS")
+	}
+}
+
 /// Every plugin, in menu order. A new plugin is a type implementing `Plugin` and one entry here.
-static PLUGINS: &[&dyn Plugin] = &[&RtShadows];
+static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays];
 
 // ---- state ------------------------------------------------------------------------------------------------------------------
 

@@ -16,6 +16,8 @@
 //!   out) plus, with Particles Enhanced, the additive particles' glow target (partfx.rs) down a chain of five half sizes and back up with a tent filter;
 //! - Sun rays On: `fs_rmask` keeps the bright sky around the key light's screen position (half size), `fs_rays` blurs it
 //!   radially towards that point (48 taps, decaying), so light shafts stream past whatever stands in front of the sky;
+//! - Ray-traced sun rays (rtrays.rs, a plugin): in place of `fs_rmask` / `fs_rays`, traced light shafts in the air between
+//!   `encode` and `composite`, written into the same two targets (`rays_io`); the composite adds them the same way;
 //! - `fs_comp`, its own pass into every sample of the MSAA target: contrast-adaptive sharpening of the scene, the occlusion
 //!   (depth-aware upsample), the bloom, then a filmic grade in linear light (gentle contrast around mid grey, a soft shoulder
 //!   above 0.75 so no white clips hard, vibrance: dull colours up to x1.15) back to the gamma-space target the GS look is drawn in.
@@ -963,6 +965,12 @@ impl Post {
 		self.t.as_ref().map(|t| (&t.scene, &t.lin, &t.glow, t.generation))
 	}
 
+	/// The ray-traced sun rays' inputs and outputs (rtrays.rs, after `prepare`): the half-size linear depth, the ray mask and rays
+	/// targets (march into the first, blur into the second, which the composite reads), and the targets' generation.
+	pub(super) fn rays_io(&self) -> Option<(&wgpu::TextureView, &[wgpu::TextureView; 2], u64)> {
+		self.t.as_ref().map(|t| (&t.lin, &t.rays, t.generation))
+	}
+
 	/// Drops the size-dependent targets (the depth target they read was recreated).
 	pub(super) fn reset(&mut self) {
 		self.t = None;
@@ -1001,7 +1009,20 @@ impl Post {
 		let bloom_tex = make("post bloom", hw, hh, BLOOM_FORMAT, LEVELS as u32);
 		let bloom: Vec<wgpu::TextureView> = (0..LEVELS as u32).map(|m| bloom_tex.create_view(&wgpu::TextureViewDescriptor { base_mip_level: m, mip_level_count: Some(1), ..Default::default() })).collect();
 		let depth_only = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
-		let rays = [make("post ray mask", hw, hh, BLOOM_FORMAT, 1).create_view(&Default::default()), make("post rays", hw, hh, BLOOM_FORMAT, 1).create_view(&Default::default())];
+		// STORAGE_BINDING: the ray-traced sun rays write them from a compute pass (rtrays.rs).
+		let ray_tex = |label| {
+			device.create_texture(&wgpu::TextureDescriptor {
+				label: Some(label),
+				size: wgpu::Extent3d { width: hw.max(1), height: hh.max(1), depth_or_array_layers: 1 },
+				mip_level_count: 1,
+				sample_count: 1,
+				dimension: wgpu::TextureDimension::D2,
+				format: BLOOM_FORMAT,
+				usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+				view_formats: &[],
+			})
+		};
+		let rays = [ray_tex("post ray mask").create_view(&Default::default()), ray_tex("post rays").create_view(&Default::default())];
 		let group = |buf: &wgpu::Buffer, v: Views| self.bind_d(device, buf, &depth_only, &scene, v);
 		let l = Some(&lin);
 		Targets {
@@ -1033,9 +1054,10 @@ impl Post {
 	/// the bloom chain (with the particle glow when `glow`) and the sun rays (`sun` = the key light's screen uv and strength).
 	/// `cam` / `aspect` are the level pass's projection.
 	#[allow(clippy::too_many_arguments)]
+	/// `traced_rays`: the ray-traced sun rays (rtrays.rs) fill the rays target after this instead of `sun`'s screen-space ones.
 	/// `fx`: the effect lights (with `glow`). `gi_level` > 0: the global illumination after `mid` (as given to `prepare`). `far`: the
 	/// world far plane the depth was drawn with (`Gpu::world_far`).
-	pub(super) fn encode(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, cam: &Camera, aspect: f32, ao_level: u8, sun_level: u8, part_level: u8, glow: bool, fx: &super::partfx::FxLights, sun: Option<([f32; 2], f32)>, gi_level: u8, far: f32, mid: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView, Option<&wgpu::TextureView>)) {
+	pub(super) fn encode(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, cam: &Camera, aspect: f32, ao_level: u8, sun_level: u8, part_level: u8, glow: bool, fx: &super::partfx::FxLights, sun: Option<([f32; 2], f32)>, traced_rays: bool, gi_level: u8, far: f32, mid: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView, Option<&wgpu::TextureView>)) {
 		let Some(t) = &self.t else { return };
 		let gi = self.gi_on(t, gi_level);
 		let ao = ao_level > 0;
@@ -1052,7 +1074,11 @@ impl Post {
 				true => [GLOW_GAIN, fx.n as f32, seconds(), if super::partfx::FX_ON && part_level >= 2 { SHIMMER } else { 0.0 }],
 				false => [0.0; 4],
 			},
-			sun: sun.map_or([0.0; 4], |(uv, s)| [uv[0], uv[1], s * RAYS, 0.0]),
+			// (Traced rays carry their own strength: the composite adds them as they are.)
+			sun: match traced_rays {
+				true => [0.0, 0.0, 1.0, 0.0],
+				false => sun.map_or([0.0; 4], |(uv, s)| [uv[0], uv[1], s * RAYS, 0.0]),
+			},
 			cam: {
 				let f = forward(cam);
 				let r = normalise(cross(f, cam.up));
@@ -1117,7 +1143,7 @@ impl Post {
 		for m in (1..LEVELS).rev() {
 			run(enc, "post bloom up", &t.bloom[m - 1], &self.p_up, &t.g_up[m - 1], wgpu::LoadOp::Load);
 		}
-		if sun.is_some() {
+		if sun.is_some() && !traced_rays {
 			run(enc, "post ray mask", &t.rays[0], &self.p_rmask, &t.g_rmask, clear);
 			run(enc, "post rays", &t.rays[1], &self.p_rays, &t.g_rays, clear);
 		}

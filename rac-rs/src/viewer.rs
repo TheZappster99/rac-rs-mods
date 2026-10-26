@@ -39,6 +39,8 @@ mod shadowvol;
 mod post;
 mod sunshadow;
 mod rtshadow;
+mod rtrays;
+mod rtmovers;
 mod waterfx;
 mod underwater;
 mod icefx;

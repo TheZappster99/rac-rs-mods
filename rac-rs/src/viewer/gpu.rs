@@ -70,7 +70,7 @@ impl Gpu {
 
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
 			label: Some("level"),
-			source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level", if super::rtshadow::on() { super::rtshadow::shader(SHADER).into() } else { SHADER.into() })),
+			source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level", if super::rtshadow::shadows() { super::rtshadow::shader(SHADER).into() } else { SHADER.into() })),
 		});
 		// [PC] Bindings 1 and 2: the dynamic-shadow cascades and their compare sampler (sunshadow.rs; read only while shadows run).
 		let ulayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -270,7 +270,7 @@ impl Gpu {
 		];
 		let bindless = bindless.then(|| {
 			let bl_layout = super::bindless::Bindless::layout(&device);
-			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("level bindless"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level bindless", { let s = super::bindless::shader_source(SHADER); if super::rtshadow::on() { super::rtshadow::shader(&s) } else { s } }.into())) });
+			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("level bindless"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level bindless", { let s = super::bindless::shader_source(SHADER); if super::rtshadow::shadows() { super::rtshadow::shader(&s) } else { s } }.into())) });
 			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("level bindless"), bind_group_layouts: &[Some(&ulayout), Some(&bl_layout)], immediate_size: 0 });
 			let make_bl = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, cull: Option<wgpu::Face>, compare: wgpu::CompareFunction| {
 				device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -382,6 +382,8 @@ impl Gpu {
 		})();
 		let mut sun = super::sunshadow::SunShadow::new(&device, Some(&props_gpu.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout));
 		sun.rt = super::rtshadow::on().then(|| super::rtshadow::RtShadow::new(&device, &queue));
+		// [PC] Ray-traced sun rays (rtrays.rs): through the same structure.
+		sun.rt_rays = (super::rtshadow::on() && super::rtrays::wanted()).then(|| super::rtrays::RtRays::new(&device));
 		let ubuf = buffer(&device, "uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM);
 		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: &ulayout, entries: &sun.entries(&ubuf) });
 		let mirror: Vec<super::mirror::Mirror> = (0..super::mirror::MAX_MIRRORS).map(|_| super::mirror::Mirror::new(&device, &ulayout, &sun)).collect();
@@ -2504,9 +2506,15 @@ impl Gpu {
 			false => None,
 		};
 		super::sunshadow::write_uniforms(&mut u, sun.as_ref());
-		// [PC] Ray-traced shadows (rtshadow.rs): the receivers trace once the level's structure is built.
+		// [PC] Ray-traced shadows (rtshadow.rs): the receivers trace once the level's structure is built (which the ray-traced sun
+		// rays also trace through).
 		if let (Some(_), Some(rt)) = (&sun, &mut self.sun.rt) {
-			u.sun_q[3] = if rt.ready(&self.device, &self.queue, scene) { 1.0 } else { 0.0 };
+			let built = rt.ready(&self.device, &self.queue, scene);
+			// [PC] Phase 4 (rtmovers.rs): the frame's mobies, the player and the debris cast too.
+			rt.movers(&self.device, &self.queue, scene, cam.pos);
+			if super::rtshadow::shadows() {
+				u.sun_q[3] = if built { 1.0 } else { 0.0 };
+			}
 		}
 		// [PC] Enhanced flag for the shaders (`crisp_leaf`).
 		u.sun_texel[3] = if post_on { 1.0 } else { 0.0 };
@@ -2539,6 +2547,12 @@ impl Gpu {
 		let rays = match post_on && gfx.sun_rays && !scene.warp_shown && !self.ship_fight {
 			true => super::post::sky_sun(self.level).and_then(|to| super::post::sun_on_screen(&u.view_proj, cam.pos, to.map(|c| -c), 1.0)),
 			false => None,
+		};
+		// [PC] Ray-traced sun rays (rtrays.rs): in place of the screen-space ones once the level's structure is built, with the key
+		// light's colour.
+		let rt_rays = match (&sun, &self.sun.rt, &self.sun.rt_rays) {
+			(Some(_), Some(rt), Some(_)) if gfx.sun_rays && rt.built() => Some(super::rtrays::key_colour(&self.light_rows())),
+			_ => None,
 		};
 		let water_frame = water_on.then(|| {
 			let rows = self.light_rows();
@@ -3337,11 +3351,11 @@ impl Gpu {
 				// [PC] Water Low / Medium / High: the underwater look (underwater.rs), after the water pass, before bloom and the grade.
 				let under_in = water_frame.as_ref().map(|f| super::underwater::frame(cam, aspect, self.under_flag, self.under_surf, &wrec, f.fog, f.key.map(|k| k.0), f.level, wfar));
 				// [PC] Ray-traced shadows (rtshadow.rs): this frame's shadow mask from the level pass's depth, read by the next frame.
-				if let (Some(f), Some(rt)) = (&sun, &mut self.sun.rt) {
+				if let (Some(f), Some(rt), true) = (&sun, &mut self.sun.rt, super::rtshadow::shadows()) {
 					rt.mask(&self.device, &self.queue, &mut enc, &self.depth, cam, aspect, (RETAIL_NEAR, wfar), f.dir, (self.config.width, self.config.height));
 				}
 				let (under, device, queue, depth) = (&mut self.under, &self.device, &self.queue, &self.depth);
-				self.post.encode(&self.queue, &mut enc, cam, aspect, gfx.ao_q, gfx.sun_q, gfx.particles_q, part_on, &fx_lights, rays, gi_level, wfar, |enc, scene, ao| {
+				self.post.encode(&self.queue, &mut enc, cam, aspect, gfx.ao_q, gfx.sun_q, gfx.particles_q, part_on, &fx_lights, rays, rt_rays.is_some(), gi_level, wfar, |enc, scene, ao| {
 					if water {
 						waterfx.shade(enc, scene, ao, fall_tex);
 					}
@@ -3350,6 +3364,9 @@ impl Gpu {
 					}
 				});
 				cuts.cut(&self.device, &mut enc, "f_pe");
+				if let (Some(col), Some(f), Some(rt), Some(rr)) = (rt_rays, &sun, &self.sun.rt, &mut self.sun.rt_rays) {
+					rr.run(&self.device, &self.queue, &mut enc, rt, &self.post, cam, aspect, f, col, gfx.sun_q);
+				}
 				self.post.composite(&mut enc, &self.msaa, gi_level);
 				cuts.cut(&self.device, &mut enc, "f_post");
 				pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {

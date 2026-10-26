@@ -58,7 +58,7 @@ pub(super) const fn quality(level: u8) -> Quality {
 /// How far each cascade reaches towards the light beyond its sphere (world units).
 const REACH: f32 = 200.0;
 /// The darkest a fully lit surface gets in a shadow (fraction of its light removed).
-const STRENGTH: f32 = 0.6;
+pub(super) const STRENGTH: f32 = 0.6;
 /// The lowest the light may stand (sine of its elevation, 35 degrees): a lower key light keeps its compass heading but is raised.
 const MIN_RISE: f32 = 0.5736;
 /// Time constant of the light's turn towards a new zone's (seconds).
@@ -306,6 +306,8 @@ pub(super) struct SunShadow {
 	last: Option<std::time::Instant>,
 	/// [PC] Ray-traced shadows (rtshadow.rs), when on: the receivers trace instead of reading the cascades.
 	pub rt: Option<super::rtshadow::RtShadow>,
+	/// [PC] Ray-traced sun rays (rtrays.rs), when on: they trace through `rt`'s structure.
+	pub rt_rays: Option<super::rtrays::RtRays>,
 }
 
 impl SunShadow {
@@ -388,7 +390,7 @@ impl SunShadow {
 			})
 		});
 		let (pipeline_shrub, pipeline_tfrag, pipeline_tie) = (make_cut("fs_sh_shrub"), make_cut("fs_sh_tfrag"), make_cut("fs_sh_tie"));
-		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None, rt: None }
+		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None, rt: None, rt_rays: None }
 	}
 
 	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2, the ray-traced
@@ -399,7 +401,7 @@ impl SunShadow {
 			wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.array) },
 			wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.cmp) },
 		];
-		if let Some(rt) = &self.rt {
+		if let Some(rt) = self.rt.as_ref().filter(|_| super::rtshadow::shadows()) {
 			e.extend(rt.entries());
 		}
 		e
