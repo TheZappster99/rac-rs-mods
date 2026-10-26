@@ -33,6 +33,11 @@ Status: phases 0-6 (moving casters, soft shadows, foliage) built and tested in g
   (about 18k triangles) plus 57k other triangles, 0.35 ms CPU per frame; 6.3 ms frame without, 6.9 ms with. Checked with
   `world=0` in RAC_RT_TUNE (only the movers cast): Ratchet casts his shape on the grass and shades his own back. The shadow mask
   is last frame's, so a moving shadow lags one frame. Props past 80 units cast nothing.
+- **Fix (2026-10-25): moving receivers do not shadow themselves.** The player turned dull brown all over in the sun: the rays
+  from his own surface hit his own shape in the movers' structure, which took away the moby lighting's wrap light on his far
+  side. The top level now tags the static world 0x01 and the movers 0x02; `sun_lit` (lit mobies, the player) takes
+  `sun_occ_moby`, one ray through 0x01 only. Ratchet still casts on the ground; mobies no longer receive other movers'
+  shadows. Checked on Veldin (scripted New Game) with `world=0`.
 - Dev keys in RAC_RT_TUNE: `movers=0` (no moving casters), `world=0` (only the moving casters).
 - Testing note: `cargo test -p rac-rs --lib` builds a 2.18 GB debug test exe that Windows refuses to run (over 2 GB). That
   predates this work. The traced shader was checked with naga in a separate scratch crate instead.

@@ -102,8 +102,11 @@ pub(super) fn layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
 /// `sun_occ_map`, the fallback until the level's structure is built).
 pub(super) fn shader(src: &str) -> String {
 	const OCC: &str = "fn sun_occ(p: vec3<f32>) -> f32 {";
-	assert!(src.contains(OCC), "rt shadows: the level shader has no sun_occ");
-	format!("enable wgpu_ray_query;\n{}\n{}{}{}", src.replacen(OCC, "fn sun_occ_map(p: vec3<f32>) -> f32 {", 1), RT_LEVEL, rt_fns(), RT_OCC)
+	// `sun_lit` (lit mobies and the player) takes `sun_occ_moby`.
+	const MOBY: &str = "sun_occ(i.w)";
+	assert!(src.contains(OCC) && src.contains(MOBY), "rt shadows: the level shader has no sun_occ or sun_lit");
+	let src = src.replacen(OCC, "fn sun_occ_map(p: vec3<f32>) -> f32 {", 1).replacen(MOBY, "sun_occ_moby(i.w)", 1);
+	format!("enable wgpu_ray_query;\n{}\n{}{}{}", src, RT_LEVEL, rt_fns(), RT_OCC)
 }
 
 /// The mask pass's shader (`cs_mask`).
@@ -197,11 +200,17 @@ fn rt_texel_casts(c: RayIntersection) -> bool {
 	return ((rt_bits[b.z + (i >> 5u)] >> (i & 31u)) & 1u) != 0u;
 }
 
-// One shadow ray from p along l (towards the light): 1 when a static world triangle within REACH casts there. It starts t0 off
-// the surface, more far from the eye (a far fragment is drawn with a coarser mesh than the traced near one, and lies off it).
+// One shadow ray from p along l (towards the light): 1 when a caster within REACH casts there, the static world or the moving
+// casters. It starts t0 off the surface, more far from the eye (a far fragment is drawn with a coarser mesh than the traced near
+// one, and lies off it).
 fn rt_ray(p: vec3<f32>, l: vec3<f32>, t0: f32) -> f32 {
+	return rt_ray_masked(p, l, t0, 0xffu);
+}
+
+// `rt_ray` through the top-level instances in `cull` only (rtshadow.rs `MASK_WORLD`: 1 the static world, 2 the moving casters).
+fn rt_ray_masked(p: vec3<f32>, l: vec3<f32>, t0: f32, cull: u32) -> f32 {
 	var rq: ray_query;
-	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, 0xffu, t0, REACH, p, l));
+	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, cull, t0, REACH, p, l));
 	while (rayQueryProceed(&rq)) {
 		if (rt_texel_casts(rayQueryGetCandidateIntersection(&rq))) {
 			rayQueryConfirmIntersection(&rq);
@@ -260,6 +269,14 @@ fn sun_occ(p: vec3<f32>) -> f32 {
 	if (m >= 0.0) { return m; }
 	return rt_ray(p, -normalize(u.sun.xyz), 0.03 + 0.004 * distance(p, u.eye.xyz));
 }
+
+// A moving receiver (a lit moby or the player, `sun_lit`): one ray of its own through the static world only. The shadow mask and
+// the moving casters hold its own shape, and the moby lighting's wrap lights the far side the sun does not reach, which its
+// own shadow took away (the player turned dark all over in the sun).
+fn sun_occ_moby(p: vec3<f32>) -> f32 {
+	if (u.sun_q.w < 0.5) { return sun_occ_map(p); }
+	return rt_ray_masked(p, -normalize(u.sun.xyz), 0.03 + 0.004 * distance(p, u.eye.xyz), 1u);
+}
 "#;
 
 /// A slot texture's level-0 alpha (logged at upload while `build_scene` runs, gpu.rs `rt_log`).
@@ -297,21 +314,21 @@ impl Cut {
 
 /// RAC_RT_TUNE=<file> (dev): `cut=tfrag,tie,shrub` (the kinds traced by texel alpha; a terrain or tie draw left out casts whole,
 /// a shrub left out casts nothing), `solid=0.98` (a texture with at least that share of casting texels casts whole) and
-/// `movers=0` (no moving casters, rtmovers.rs), `world=0` (debug: only the moving casters). The file is read again when
+/// `movers=0` (no moving casters; or a list of `props,player,clip,debris`, rtmovers.rs), `world=0` (debug: only the moving casters). The file is read again when
 /// it changes, and the level's structure rebuilt.
 #[derive(Clone, PartialEq, Debug)]
 struct Tune {
 	cut: [bool; 3],
 	solid: f32,
-	/// `movers=0` leaves the moving casters out (rtmovers.rs).
-	movers: bool,
+	/// Which moving casters cast (rtmovers.rs `Which`): `movers=0` none, `movers=props,player,clip,debris` those.
+	movers: super::rtmovers::Which,
 	/// `world=0` leaves the static world out (debug: only the movers cast).
 	world: bool,
 }
 
 impl Default for Tune {
 	fn default() -> Tune {
-		Tune { cut: [true; 3], solid: 1.0, movers: true, world: true }
+		Tune { cut: [true; 3], solid: 1.0, movers: super::rtmovers::Which::ALL, world: true }
 	}
 }
 
@@ -322,7 +339,7 @@ impl Tune {
 			match w.split_once('=') {
 				Some(("cut", v)) => t.cut = ["tfrag", "tie", "shrub"].map(|k| v.split(',').any(|x| x == k)),
 				Some(("solid", v)) => t.solid = v.parse().unwrap_or(1.0),
-				Some(("movers", v)) => t.movers = v != "0",
+				Some(("movers", v)) => t.movers = super::rtmovers::Which::parse(v),
 				Some(("world", v)) => t.world = v != "0",
 				_ => {}
 			}
@@ -431,6 +448,10 @@ pub(super) struct RtShadow {
 }
 
 const IDENTITY: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+/// The top level's instance masks: the static world (slot 0) and the moving casters (slot 1, rtmovers.rs). A ray with cull mask
+/// 0xff sees both; the moving receivers trace `MASK_WORLD` only (`sun_occ_moby`).
+const MASK_WORLD: u8 = 0x01;
+const MASK_MOVERS: u8 = 0x02;
 
 impl RtShadow {
 	/// The top level, built empty so the level's bind groups can hold it before any level loads, the alpha tables and the
@@ -545,9 +566,9 @@ impl RtShadow {
 		if self.blas.is_none() {
 			return;
 		}
-		let blas = if self.tune.movers { self.movers.build(device, queue, scene, eye) } else { None };
-		self.tlas[0] = self.blas.as_ref().filter(|_| self.tune.world).map(|b| wgpu::TlasInstance::new(b, IDENTITY, 0, 0xff));
-		self.tlas[1] = blas.map(|b| wgpu::TlasInstance::new(b, IDENTITY, 1, 0xff));
+		let blas = self.movers.build(device, queue, scene, eye, self.tune.movers);
+		self.tlas[0] = self.blas.as_ref().filter(|_| self.tune.world).map(|b| wgpu::TlasInstance::new(b, IDENTITY, 0, MASK_WORLD));
+		self.tlas[1] = blas.map(|b| wgpu::TlasInstance::new(b, IDENTITY, 1, MASK_MOVERS));
 		let mut enc = device.create_command_encoder(&Default::default());
 		enc.build_acceleration_structures(std::iter::empty(), std::iter::once(&self.tlas));
 		queue.submit([enc.finish()]);
@@ -686,7 +707,7 @@ impl RtShadow {
 			.zip(&sizes)
 			.map(|(g, size)| wgpu::BlasTriangleGeometry { size, vertex_buffer: &g.batch.vbuf, first_vertex: 0, vertex_stride: std::mem::size_of::<Vertex>() as u64, index_buffer: Some(&ibuf), first_index: Some(g.first), transform_buffer: None, transform_buffer_offset: None })
 			.collect();
-		self.tlas[0] = Some(wgpu::TlasInstance::new(&blas, IDENTITY, 0, 0xff));
+		self.tlas[0] = Some(wgpu::TlasInstance::new(&blas, IDENTITY, 0, MASK_WORLD));
 		enc.build_acceleration_structures(std::iter::once(&wgpu::BlasBuildEntry { blas: &blas, geometry: wgpu::BlasGeometries::TriangleGeometries(geometry) }), std::iter::once(&self.tlas));
 		queue.submit([enc.finish()]);
 		eprintln!(

@@ -62,13 +62,15 @@ const RAYS_MARCH: &str = r#"
 // The air's density (per world unit) and how forward it scatters (Henyey-Greenstein g; 0 = the same every way).
 // (First playtest, Kerwan towards the sun, 2026-10-25: SIGMA 0.006 / GAIN 1.6 / no cap washed the whole view out to white and
 // drowned the shafts; thinner air, a lower gain and a soft cap keep the picture and let the shadowed gaps read.)
-const SIGMA: f32 = 0.003;
+// (Second playtest, Kerwan in the sun: SIGMA 0.003 / FORWARD 0.7 / CAP 0.35 still laid a flat yellow veil over the far
+// buildings in every direction; thinner air, a narrower same-every-way share and a lower cap keep the shafts towards the sun.)
+const SIGMA: f32 = 0.0015;
 const G: f32 = 0.6;
 // The share of the light scattered by the forward lobe (the rest the same every way), the shafts' overall gain, and the soft
 // cap the added light approaches (linear).
-const FORWARD: f32 = 0.7;
+const FORWARD: f32 = 0.85;
 const GAIN: f32 = 0.6;
-const CAP: f32 = 0.35;
+const CAP: f32 = 0.2;
 
 fn ign(x: vec2<f32>) -> f32 {
 	return fract(52.9829189 * fract(dot(x, vec2<f32>(0.06711056, 0.00583715))));

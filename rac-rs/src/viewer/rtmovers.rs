@@ -18,6 +18,31 @@ const NEAR: f32 = 80.0;
 /// Builds between two summaries in the run log (about 5 s at 60 fps).
 const LOG_EVERY: u32 = 300;
 
+/// Which groups of moving casters cast (RAC_RT_TUNE `movers=`, rtshadow.rs `Tune`): the props slots, the player, the clipped
+/// props, the debris.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) struct Which {
+	pub props: bool,
+	pub player: bool,
+	pub clip: bool,
+	pub debris: bool,
+}
+
+impl Which {
+	pub(super) const ALL: Which = Which { props: true, player: true, clip: true, debris: true };
+
+	/// `1` all, `0` none, else the named groups (`props,player,clip,debris`).
+	pub(super) fn parse(v: &str) -> Which {
+		match v {
+			"1" => Which::ALL,
+			_ => {
+				let has = |k| v.split(',').any(|x| x == k);
+				Which { props: has("props"), player: has("player"), clip: has("clip"), debris: has("debris") }
+			}
+		}
+	}
+}
+
 /// One geometry of the movers' structure: a vertex buffer and its run in the compact index buffer.
 struct Geo<'a> {
 	vbuf: &'a wgpu::Buffer,
@@ -44,14 +69,14 @@ pub(super) struct RtMovers {
 impl RtMovers {
 	/// Builds this frame's structure (submitted on its own, ahead of the frame's) from the scene's moving casters around
 	/// `eye`; None when nothing moves near enough to cast. The previous frame's structure stays alive until this returns.
-	pub(super) fn build(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, eye: [f32; 3]) -> Option<&wgpu::Blas> {
+	pub(super) fn build(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, eye: [f32; 3], which: Which) -> Option<&wgpu::Blas> {
 		let _s = super::profile::span("rt_movers");
 		let t = std::time::Instant::now();
 		let solid = |d: &Draw| !scene.clear_tex.get(d.texture).copied().unwrap_or(false);
 		// The props slots that cast, posed into `scratch` at their vertex ranges (the ranges are uploaded one by one).
 		let mut runs: Vec<(u32, u32)> = Vec::new();
 		let mut slots: Vec<usize> = Vec::new();
-		if scene.props_shown {
+		if scene.props_shown && which.props {
 			for (i, s) in scene.props_inst.iter().enumerate() {
 				let kind = s.k[0] & 0xff;
 				let alpha = 128.0 - ((s.a[1] - (s.a[1] + 0.5).floor()).abs() * 512.0).round();
@@ -78,11 +103,13 @@ impl RtMovers {
 		// The world-space batches: the player, the clipped props, the debris (their solid draws).
 		let mut whole: Vec<(&Batch, Vec<(u32, u32)>)> = Vec::new();
 		let add = |b: &Batch| b.draws.iter().filter(|d| solid(d)).map(|d| (d.start, d.count)).collect::<Vec<_>>();
-		if scene.marker_shown {
+		if scene.marker_shown && which.player {
 			whole.push((&scene.marker, add(&scene.marker)));
 		}
-		if scene.props_shown {
+		if scene.props_shown && which.clip {
 			whole.push((&scene.clip_batch, add(&scene.clip_batch)));
+		}
+		if scene.props_shown && which.debris {
 			if let Some(b) = &scene.debris {
 				whole.push((b, add(b)));
 			}
