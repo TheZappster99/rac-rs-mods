@@ -668,9 +668,9 @@ mod tests {
 		let alpha = vec![Some(Alpha::of(&t))];
 		let mut m = Masks::default();
 		// Ties cast from 63.5 / 128: alpha 255 and 128 cast, 0 and 100 (49.8) do not.
-		assert!(matches!(m.get(&alpha, 0, Cut::Tie), Mask::Cut { off: 0, w: 2, h: 2 }));
+		assert!(matches!(m.get(&alpha, 0, Cut::Tie, &Tune::default()), Mask::Cut { off: 0, w: 2, h: 2 }));
 		assert_eq!(m.bits, vec![0b1001]);
-		assert!(matches!(m.get(&alpha, 0, Cut::Whole), Mask::Solid));
-		assert!(matches!(m.get(&alpha, 1, Cut::Tie), Mask::Solid), "no texture: whole");
+		assert!(matches!(m.get(&alpha, 0, Cut::Whole, &Tune::default()), Mask::Solid));
+		assert!(matches!(m.get(&alpha, 1, Cut::Tie, &Tune::default()), Mask::Solid), "no texture: whole");
 	}
 }
