@@ -38,6 +38,7 @@ mod clip;
 mod shadowvol;
 mod post;
 mod sunshadow;
+mod rtshadow;
 mod waterfx;
 mod underwater;
 mod icefx;
@@ -1220,6 +1221,8 @@ struct Scene {
 	/// [PC] Dynamic shadows: per texture slot, whether most of its texels blend (PS2 alpha below 0x60, `fs_moby_b`): see-through
 	/// effect shells (blast domes, glows) cast no sun shadow (sunshadow.rs).
 	clear_tex: Vec<bool>,
+	/// [PC] Ray-traced shadows (rtshadow.rs): each slot's texture alpha, by `bind_groups` index (empty while they are off).
+	rt_alpha: Vec<Option<std::sync::Arc<rtshadow::Alpha>>>,
 	/// `bind_groups` index -> the first-instance word of a moby draw with that slot (TEX1 K and chain top level; 0 = plain sample).
 	slot_words: Vec<u32>,
 	/// [PC] perf round 3: `bind_groups` as one texture array (bindless.rs; None = per-draw bind groups).
@@ -2279,7 +2282,7 @@ fn buffer(device: &wgpu::Device, label: &str, data: &[u8], usage: wgpu::BufferUs
 	let buf = device.create_buffer(&wgpu::BufferDescriptor {
 		label: Some(label),
 		size: (data.len() as u64).max(4).next_multiple_of(4),
-		usage: usage | wgpu::BufferUsages::COPY_DST,
+		usage: rtshadow::usage(usage) | wgpu::BufferUsages::COPY_DST,
 		mapped_at_creation: false,
 	});
 	buf

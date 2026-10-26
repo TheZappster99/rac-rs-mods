@@ -33,7 +33,17 @@ impl Gpu {
 			},
 			false => wgpu::DeviceDescriptor { required_features: stencil_feature, required_limits: wgpu::Limits { max_storage_buffer_binding_size: storage_bind, ..Default::default() }, ..Default::default() },
 		};
+		// [PC] Ray-traced sun shadows (rtshadow.rs, RAC_RT_SHADOWS=1): wgpu's ray queries are experimental and need its opt-in.
+		let rt = super::rtshadow::features(&adapter);
+		let mut desc = desc;
+		if !rt.is_empty() {
+			desc.required_features |= rt;
+			desc.required_limits = desc.required_limits.clone().using_acceleration_structure_values(adapter.limits());
+			// SAFETY: the opt-in only unlocks the EXPERIMENTAL_* features; rtshadow.rs is the one user and stays behind its switch.
+			desc.experimental_features = unsafe { wgpu::ExperimentalFeatures::enabled() };
+		}
 		let (device, queue) = pollster::block_on(adapter.request_device(&desc)).expect("device");
+		super::rtshadow::enable(&device);
 		// [PC] wgpu drops a lost device's errors (driver reset, GPU timeout) and the window just stays blank: say so in the run log.
 		device.set_device_lost_callback(|reason, msg| {
 			if reason != wgpu::DeviceLostReason::Destroyed {
@@ -60,7 +70,7 @@ impl Gpu {
 
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
 			label: Some("level"),
-			source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level", SHADER.into())),
+			source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level", if super::rtshadow::on() { super::rtshadow::shader(SHADER).into() } else { SHADER.into() })),
 		});
 		// [PC] Bindings 1 and 2: the dynamic-shadow cascades and their compare sampler (sunshadow.rs; read only while shadows run).
 		let ulayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -79,7 +89,11 @@ impl Gpu {
 					count: None,
 				},
 				wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
-			],
+			]
+			.into_iter()
+			// [PC] Bindings 3..5: the ray-traced shadows' top-level structure and texel-alpha tables (rtshadow.rs), only while they are on.
+			.chain(super::rtshadow::layout_entries())
+			.collect::<Vec<_>>(),
 		});
 		let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("texture"),
@@ -256,7 +270,7 @@ impl Gpu {
 		];
 		let bindless = bindless.then(|| {
 			let bl_layout = super::bindless::Bindless::layout(&device);
-			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("level bindless"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level bindless", super::bindless::shader_source(SHADER).into())) });
+			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("level bindless"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level bindless", { let s = super::bindless::shader_source(SHADER); if super::rtshadow::on() { super::rtshadow::shader(&s) } else { s } }.into())) });
 			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("level bindless"), bind_group_layouts: &[Some(&ulayout), Some(&bl_layout)], immediate_size: 0 });
 			let make_bl = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, cull: Option<wgpu::Face>, compare: wgpu::CompareFunction| {
 				device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -366,7 +380,8 @@ impl Gpu {
 			});
 			super::gpuskin::PropsGpu::new(&device, skin_layout, opaque, cull, moby, [mc0, mc1, mc2, mc3])
 		})();
-		let sun = super::sunshadow::SunShadow::new(&device, Some(&props_gpu.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout));
+		let mut sun = super::sunshadow::SunShadow::new(&device, Some(&props_gpu.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout));
+		sun.rt = super::rtshadow::on().then(|| super::rtshadow::RtShadow::new(&device, &queue));
 		let ubuf = buffer(&device, "uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM);
 		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: &ulayout, entries: &sun.entries(&ubuf) });
 		let mirror: Vec<super::mirror::Mirror> = (0..super::mirror::MAX_MIRRORS).map(|_| super::mirror::Mirror::new(&device, &ulayout, &sun)).collect();
@@ -463,7 +478,7 @@ impl Gpu {
 	}
 
 	pub(super) fn ctx(&self) -> SceneCtx {
-		SceneCtx { device: self.device.clone(), queue: self.queue.clone(), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), paced: false }
+		SceneCtx { device: self.device.clone(), queue: self.queue.clone(), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), rt_log: std::cell::RefCell::new(None), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), paced: false }
 	}
 
 	pub(super) fn upload(&self, t: Option<&Texture>, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
@@ -2489,6 +2504,10 @@ impl Gpu {
 			false => None,
 		};
 		super::sunshadow::write_uniforms(&mut u, sun.as_ref());
+		// [PC] Ray-traced shadows (rtshadow.rs): the receivers trace once the level's structure is built.
+		if let (Some(_), Some(rt)) = (&sun, &mut self.sun.rt) {
+			u.sun_q[3] = if rt.ready(&self.device, &self.queue, scene) { 1.0 } else { 0.0 };
+		}
 		// [PC] Enhanced flag for the shaders (`crisp_leaf`).
 		u.sun_texel[3] = if post_on { 1.0 } else { 0.0 };
 		self.queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
@@ -3317,6 +3336,10 @@ impl Gpu {
 				let fall_tex = super::waterfx::fall_fx_tex(self.level).first().and_then(|t| self.fx_tex.get(t));
 				// [PC] Water Low / Medium / High: the underwater look (underwater.rs), after the water pass, before bloom and the grade.
 				let under_in = water_frame.as_ref().map(|f| super::underwater::frame(cam, aspect, self.under_flag, self.under_surf, &wrec, f.fog, f.key.map(|k| k.0), f.level, wfar));
+				// [PC] Ray-traced shadows (rtshadow.rs): this frame's shadow mask from the level pass's depth, read by the next frame.
+				if let (Some(f), Some(rt)) = (&sun, &mut self.sun.rt) {
+					rt.mask(&self.device, &self.queue, &mut enc, &self.depth, cam, aspect, (RETAIL_NEAR, wfar), f.dir, (self.config.width, self.config.height));
+				}
 				let (under, device, queue, depth) = (&mut self.under, &self.device, &self.queue, &self.depth);
 				self.post.encode(&self.queue, &mut enc, cam, aspect, gfx.ao_q, gfx.sun_q, gfx.particles_q, part_on, &fx_lights, rays, gi_level, wfar, |enc, scene, ao| {
 					if water {
@@ -4057,7 +4080,7 @@ fn grow_plan(old: &GrowOld, at: usize, classes: &[u32], ranges: &[std::ops::Rang
 /// `buffer` of `bytes` (rounded up to 4, at least 4) for data written later (copyable: `append_props` grows the prop
 /// buffers by a GPU copy).
 fn sized_buffer(device: &wgpu::Device, label: &str, bytes: usize, usage: wgpu::BufferUsages) -> wgpu::Buffer {
-	device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (bytes as u64).max(4).next_multiple_of(4), usage: usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })
+	device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (bytes as u64).max(4).next_multiple_of(4), usage: super::rtshadow::usage(usage) | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })
 }
 
 /// The mesh of each prop slot (the bolt classes fall back to the bolt mesh, a class without one is empty).
@@ -4775,6 +4798,8 @@ pub(super) struct SceneCtx {
 	pub(super) tex_layout: wgpu::BindGroupLayout,
 	/// While `build_scene` runs: the texture view of every bind group `upload` / `upload_chain` made with the scene sampler (bindless.rs).
 	pub(super) tex_log: std::cell::RefCell<Option<HashMap<wgpu::BindGroup, wgpu::TextureView>>>,
+	/// [PC] While `build_scene` runs with ray-traced shadows on: the level-0 alpha of every bind group's texture (rtshadow.rs).
+	pub(super) rt_log: std::cell::RefCell<Option<HashMap<wgpu::BindGroup, std::sync::Arc<super::rtshadow::Alpha>>>>,
 	/// The bindless array layout (None: per-draw bind groups).
 	pub(super) bindless_layout: Option<wgpu::BindGroupLayout>,
 	/// Set on the level-prefetch thread: big buffer writes go in 4 MB pieces (see `wb`).
@@ -4874,6 +4899,9 @@ impl SceneCtx {
 		// sampler itself; a missing view turned the array path off on levels with clamped shrub materials).
 		if let Some(log) = self.tex_log.borrow_mut().as_mut() {
 			log.insert(bind.clone(), view);
+		}
+		if let Some(log) = self.rt_log.borrow_mut().as_mut() {
+			log.insert(bind.clone(), super::rtshadow::Alpha::of(t));
 		}
 		bind
 	}
@@ -4983,6 +5011,9 @@ impl SceneCtx {
 		// sampler itself; a missing view turned the array path off on levels with clamped shrub materials).
 		if let Some(log) = self.tex_log.borrow_mut().as_mut() {
 			log.insert(bind.clone(), view);
+		}
+		if let Some(log) = self.rt_log.borrow_mut().as_mut() {
+			log.insert(bind.clone(), super::rtshadow::Alpha::of(t));
 		}
 		bind
 	}
@@ -5104,6 +5135,7 @@ impl SceneCtx {
 	pub(super) fn build_scene(&self, meshes: &[Mesh], shrub_set: &[shrubs::ShrubInstance], tie_set: &[ties::LitTie], textures: &HashMap<u32, Texture>, sky: Option<&sky::Sky>, hero: Option<&Mesh>, hero_tint: Option<([f32; 3], usize, usize)>, mut props_fn: impl FnMut(Option<&[u32]>) -> Option<Vec<u32>>, prop_meshes: &HashMap<u32, Mesh>, preview_meshes: &HashMap<u32, Mesh>, occ: crate::occlusion::Occlusion, tfrag_set: Vec<terrain::TfragLods>, tfrag_b: f32, terrain_chains: &[Option<Vec<Texture>>], shrub_chains: &[Option<Vec<Texture>>], tie_chains: &[Option<Vec<Texture>>]) -> Option<Scene> {
 		let (mut bind, mut slots) = (Vec::new(), HashMap::new());
 		*self.tex_log.borrow_mut() = self.bindless_layout.is_some().then(HashMap::new);
+		*self.rt_log.borrow_mut() = super::rtshadow::on().then(HashMap::new);
 		let refs: Vec<&Mesh> = meshes.iter().collect();
 		let (world, lo, hi, world_verts) = self.batch(&refs, None, false, textures, &mut bind, &mut slots);
 		crate::loadlog::say(|| "gpu: world batch".into());
@@ -5327,7 +5359,10 @@ impl SceneCtx {
 		for (&key, &i) in &slots {
 			slot_words[i] = moby_word(key, textures.get(&(key & crate::mobies::KEY_MASK)));
 		}
-		Some(Scene { previews, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), tie_lod: vec![u8::MAX; tie_set.len()], occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tfrag_lod: Vec::new(), tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, tie_vkey, shrub_vkey, ice_level: usize::MAX, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props, props_ibuf_spare: None, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), marker_key: None, marker_skin: (Vec::new(), Vec::new()), marker_gpu, tie_pass: None, tie_jobs: Vec::new(), tie_gpu, debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, clear_tex: clear_slots(&slots, bind.len(), textures), bind_groups: bind, tex_slots: slots, slot_words, tex_array, clear, centre, radius })
+		// [PC] Ray-traced shadows (rtshadow.rs): the alpha of each slot's texture, by `bind_groups` index.
+		let rt_log = self.rt_log.borrow_mut().take();
+		let rt_alpha = bind.iter().map(|b| rt_log.as_ref().and_then(|l| l.get(b).cloned())).collect();
+		Some(Scene { previews, rt_alpha, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), tie_lod: vec![u8::MAX; tie_set.len()], occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tfrag_lod: Vec::new(), tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, tie_vkey, shrub_vkey, ice_level: usize::MAX, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props, props_ibuf_spare: None, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), marker_key: None, marker_skin: (Vec::new(), Vec::new()), marker_gpu, tie_pass: None, tie_jobs: Vec::new(), tie_gpu, debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, clear_tex: clear_slots(&slots, bind.len(), textures), bind_groups: bind, tex_slots: slots, slot_words, tex_array, clear, centre, radius })
 	}
 }
 

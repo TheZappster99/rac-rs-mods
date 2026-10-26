@@ -304,6 +304,8 @@ pub(super) struct SunShadow {
 	dir: Option<([f32; 3], f32)>,
 	scene_id: usize,
 	last: Option<std::time::Instant>,
+	/// [PC] Ray-traced shadows (rtshadow.rs), when on: the receivers trace instead of reading the cascades.
+	pub rt: Option<super::rtshadow::RtShadow>,
 }
 
 impl SunShadow {
@@ -386,16 +388,21 @@ impl SunShadow {
 			})
 		});
 		let (pipeline_shrub, pipeline_tfrag, pipeline_tie) = (make_cut("fs_sh_shrub"), make_cut("fs_sh_tfrag"), make_cut("fs_sh_tie"));
-		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None }
+		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None, rt: None }
 	}
 
-	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2.
-	pub(super) fn entries<'a>(&'a self, ubuf: &'a wgpu::Buffer) -> [wgpu::BindGroupEntry<'a>; 3] {
-		[
+	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2, the ray-traced
+	/// shadows' top level and texel-alpha tables at 3..5 while they are on.
+	pub(super) fn entries<'a>(&'a self, ubuf: &'a wgpu::Buffer) -> Vec<wgpu::BindGroupEntry<'a>> {
+		let mut e = vec![
 			wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
 			wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.array) },
 			wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.cmp) },
-		]
+		];
+		if let Some(rt) = &self.rt {
+			e.extend(rt.entries());
+		}
+		e
 	}
 
 	/// This frame's light and cascades, or None when nothing casts (no lit key light). `rows` are the level's light rows;
