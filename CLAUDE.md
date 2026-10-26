@@ -110,6 +110,19 @@ text ids `0x7fc0..0x8000` (our `titlequit.rs` Quit Game row uses `BASE+0xE000..0
 the "Ray-traced shadows" built-in mod (`rt-shadows`) or `RAC_RT_SHADOWS=1`, Vulkan + `EXPERIMENTAL_RAY_QUERY` only). Read it before touching shadows. `build\release\rac-rs.orig.exe`
 is the untouched exe kept for A/B comparison.
 
+## Updating from upstream
+
+This folder (`F:\Games\Ratchet and Clank Remastered`, the RAC-RS Launcher's install) is the dev copy: branch `mods-migration` = our
+work on top of the official releases, `main` = the official releases only, one "Upstream rac-rs vX as downloaded" commit each. Never
+let the launcher update this install (it would replace our code). A new official release is installed into a separate folder, then:
+
+1. Commit that folder's files onto `main` without touching this working tree: a temporary `GIT_INDEX_FILE`, `git read-tree main`,
+   `git --work-tree=<new folder> add -A`, `git write-tree`, `git commit-tree -p main`. Take the tree before its setup has run (or
+   drop the `Cargo.lock` setup rewrote and any `__pycache__`), and check no generated / disc-derived path slipped in.
+2. `git merge main` into `mods-migration`; upstream often moves code between files, so port our hunks by hand where a file was split.
+   Check upstream's new reserved RAM ranges / text ids against ours and the level shader's group-0 bindings (`rtshadow.rs` uses 4..8).
+3. Rebuild with `setup.ps1 -Console -Iso "<iso>" -NoShortcut` (regenerates only what changed) and run the game once.
+
 ## Conventions
 
 - Rust source is indented with tabs; comments are plain, explanatory prose stating *why*. User-facing text (README, CHANGELOG)
