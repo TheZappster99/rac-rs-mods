@@ -37,6 +37,8 @@
 //! debug=off        off on           (Pause -> Options -> Controls -> Debug -> Debug mode: On switches the test keys of retail/devtools.rs (F1 planet
 //!                   list / warp, F2 free camera) and retail/debugkeys.rs (F5 immortality, F6 infinite ammo, F8 +10000 bolts, F3 draw distance A/B)
 //!                   on; only `on` is written, the env switches RAC_DEV_TOOLS / RAC_DEBUG_KEYS still force them on)
+//! plugins=rt_shadows:on   id:on|off,...   (Pause -> Options -> Plugins: the plugins off their default; plugins.rs, retail/pcplug.rs)
+//! plugin.rt_shadows=quality:high   setting:value,...   (Pause -> Options -> Plugins, a plugin's own page: its settings off their default)
 //! ```
 //!
 //! A missing file, a missing key or a value that cannot be read gives that key's default (camera modern, strafe on, language

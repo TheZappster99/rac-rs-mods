@@ -507,7 +507,7 @@ fn canary(mem: &mut Mem, field: u32) {
 	static ARMED: AtomicBool = AtomicBool::new(false);
 	static BAD: Mutex<u32> = Mutex::new(0);
 	if !ARMED.swap(true, Ordering::Relaxed) {
-		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a)) {
+		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a) && !super::pcplug::RANGE.contains(a)) {
 			mem.wr8(a, 0xa5);
 		}
 		eprintln!("retail: canary armed {LO:#x}..{HI:#x} at field {field}");
@@ -519,7 +519,7 @@ fn canary(mem: &mut Mem, field: u32) {
 	let mut bad = BAD.lock().unwrap();
 	for a in LO..HI {
 		// The Controls page (pcctl.rs) lives in the range too and writes its own bytes, and so does its Debug section's text pool.
-		if (own_lo..own_hi).contains(&a) || co.contains(&a) || super::pcctl::RANGE.contains(&a) || super::pcctl::DBG_RANGE.contains(&a) || mem.rd8(a) == 0xa5 {
+		if (own_lo..own_hi).contains(&a) || co.contains(&a) || super::pcctl::RANGE.contains(&a) || super::pcctl::DBG_RANGE.contains(&a) || super::pcplug::RANGE.contains(&a) || mem.rd8(a) == 0xa5 {
 			continue;
 		}
 		*bad += 1;

@@ -65,7 +65,7 @@ const CPAGE: u32 = CBASE + 0x100;
 const CHDR: u32 = CBASE + 0x200;
 const CVAL: u32 = CBASE + 0x280;
 const CTAB: u32 = CBASE + 0x300;
-/// The Options list's picture records (9 x 8 bytes), moved here from pcext's block (it would overlap the Graphics page).
+/// The Options list's picture records (10 x 8 bytes: Graphics, Controls, Plugins), moved here from pcext's block (it would overlap the Graphics page).
 pub const PICS: u32 = CBASE + 0x500;
 /// Text pool: one 0x40-byte slot per id.
 const POOL: u32 = CBASE + 0x600;
@@ -149,7 +149,7 @@ fn target(sec: usize, r: usize) -> Target {
 
 // ---- texts ---------------------------------------------------------------------------------------------------------------
 
-type T5 = [&'static [u8]; 5];
+pub(super) type T5 = [&'static [u8]; 5];
 
 /// Function names (index = `binds` function), En Fr De Es It, in the game's font bytes (a-acute 0x84, e-acute 0x8c, u-umlaut 0xa7,
 /// a-umlaut 0x87, u-grave 0xa5, i-acute 0x94 [I]). The pad's own names, as the printed manual has them.
@@ -190,7 +190,7 @@ static RESET_PAD: T5 = [b"Reset controller", b"R\x8cinit. manette", b"Controller
 static CONTROLS: T5 = [b"Controls", b"Commandes", b"Steuerung", b"Controles", b"Controlli"];
 static HEADER: T5 = [b"Controls Options", b"Options commandes", b"Steuerungs-Optionen", b"Opciones de controles", b"Opzioni controlli"];
 static DESC: T5 = [b"Remap keys and controller buttons", b"Changer touches et boutons", b"Tasten und Belegung \x87ndern", b"Cambia teclas y botones", b"Cambia tasti e pulsanti"];
-static PAGE: T5 = [b"Page", b"Page", b"Seite", b"P\x84gina", b"Pagina"];
+pub(super) static PAGE: T5 = [b"Page", b"Page", b"Seite", b"P\x84gina", b"Pagina"];
 static HUD: T5 = [b"HUD", b"HUD", b"HUD", b"HUD", b"HUD"];
 static SHARP: T5 = [b"Sharp", b"Net", b"Scharf", b"N\x94tido", b"Nitido"];
 static ORIGINAL: T5 = [b"Original", b"Original", b"Original", b"Original", b"Originale"];
@@ -226,7 +226,7 @@ static GSECTIONS: [T5; NGSEC] = [
 ];
 
 /// "< name >": the stepper's value (`<` and `>` are glyphs of all three fonts).
-fn stepper(name: &[u8]) -> Vec<u8> {
+pub(super) fn stepper(name: &[u8]) -> Vec<u8> {
 	let mut v = b"< ".to_vec();
 	v.extend_from_slice(name);
 	v.extend_from_slice(b" >");
@@ -289,7 +289,7 @@ pub fn text_hook(c: &mut Cpu, id: u32, lang: usize) -> bool {
 
 // ---- the tables and the pages --------------------------------------------------------------------------------------------
 
-fn copy_words(mem: &mut Mem, from: u32, to: u32, len: u32) {
+pub(super) fn copy_words(mem: &mut Mem, from: u32, to: u32, len: u32) {
 	for o in (0..len).step_by(4) {
 		let w = mem.rd32(from + o);
 		mem.wr32(to + o, w);
@@ -404,9 +404,9 @@ pub fn debug_on(mem: &mut Mem) -> Option<bool> {
 
 /// A page's section stepper: the section shown and the selector byte as last seen (0xff: not known yet, the next look is the
 /// baseline).
-struct Pager {
-	sec: usize,
-	seen: u8,
+pub(super) struct Pager {
+	pub(super) sec: usize,
+	pub(super) seen: u8,
 }
 
 struct St {
@@ -443,7 +443,7 @@ const DONE_FIELDS: u32 = 50;
 const MENU_MODE: u32 = 0x15f5a4;
 
 /// Whether the open pause page is `page` with `item` as its current item and its cursor on row 0, idle (not flying in or out).
-fn on_selector(mem: &mut Mem, level: u32, page: u32, item: u32) -> bool {
+pub(super) fn on_selector(mem: &mut Mem, level: u32, page: u32, item: u32) -> bool {
 	if mem.rd32(crate::retail::disc::va(MENU_MODE)) != mouse_menu::MODE {
 		return false;
 	}
@@ -459,14 +459,14 @@ fn on_selector(mem: &mut Mem, level: u32, page: u32, item: u32) -> bool {
 }
 
 /// Whether a held direction steps in this field: on the press, then after 12 fields every 4 (the menu's own auto-repeat feel).
-fn repeat_due(held: u32) -> bool {
+pub(super) fn repeat_due(held: u32) -> bool {
 	held == 1 || (held >= 13 && (held - 13) % 4 == 0)
 }
 
 /// One field of a stepper: the section after this field's input, if it changed. `sel` is the selector byte (the retail item's
 /// Cross toggled it: the next section), `dir` Left / Right this field (the previous / next section), `on_row` (asked only when
 /// there is an input) whether the page's cursor is on the selector. The steps wrap around the `n` sections.
-fn pager_step(p: &mut Pager, sel: u8, dir: [bool; 2], n: usize, on_row: impl FnOnce() -> bool) -> Option<usize> {
+pub(super) fn pager_step(p: &mut Pager, sel: u8, dir: [bool; 2], n: usize, on_row: impl FnOnce() -> bool) -> Option<usize> {
 	let cross = p.seen != 0xff && p.seen != sel;
 	p.seen = sel;
 	if !(cross || dir[0] != dir[1]) || !on_row() {
@@ -613,7 +613,7 @@ mod tests {
 		assert!(DBG_POOL + SLOT * (ID_DBG_END - ID_DBG0) == DBG_RANGE.end && DBG_RANGE.end <= BASE + 0x10000);
 		assert!(DBG_RANGE.start >= RANGE.end || DBG_RANGE.end <= RANGE.start, "no overlap with the Controls region");
 		assert!(RANGE.contains(&DBGB) && DBGB != HUDB && DBGB < G_MAGIC_AT && ID_DBG_VAL + NDKEYS as u32 <= ID_DBG_END && ID_DBG_KEY + NDKEYS as u32 <= ID_DBG_VAL);
-		assert!(PICS + 9 * 8 <= POOL && CTAB + 24 * TABLE_RECS as u32 <= PICS && CVAL + 0x40 <= CTAB && CHDR + 0x58 <= CVAL && CPAGE + 0x100 <= CHDR && MAGIC_AT + 4 <= CPAGE);
+		assert!(PICS + 10 * 8 <= POOL && CTAB + 24 * TABLE_RECS as u32 <= PICS && CVAL + 0x40 <= CTAB && CHDR + 0x58 <= CVAL && CPAGE + 0x100 <= CHDR && MAGIC_AT + 4 <= CPAGE);
 		assert!(CBASE + ROWS as u32 <= G_SEL && HUDB < G_MAGIC_AT && G_MAGIC_AT + 4 <= MAGIC_AT);
 		assert_eq!(table(0).len(), 7 * 6);
 		assert!(ID_HUD < ID_LAST && ID_ORIGINAL < ID_LAST);

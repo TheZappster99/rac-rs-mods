@@ -37,6 +37,7 @@ mod occlusion;
 mod overlay;
 mod physics;
 mod player;
+mod plugins;
 mod render;
 mod retail;
 mod save;

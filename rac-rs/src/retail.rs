@@ -32,6 +32,7 @@ pub mod aim;
 pub mod pcext;
 pub mod binds;
 pub mod pcctl;
+pub mod pcplug;
 pub mod prompts;
 pub mod pspad;
 pub mod vendor;
@@ -3227,6 +3228,8 @@ impl Retail {
 						modcam::pre_field(&mut m, &fin2);
 						strafe::pre_field(&mut m, &fin2);
 						aim::pre_field(&mut m, &fin2);
+						// The live plugins that are on (plugins.rs).
+						crate::plugins::pre_field(&mut m);
 					} else if front {
 						// The title's Options -> Graphics rows (pcext.rs `front_field`).
 						pcext::front_field(&mut m);

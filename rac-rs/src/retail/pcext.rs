@@ -46,6 +46,9 @@
 //!   +10000 bolts) work without the environment variables (those still force them on); switching it On draws a notice with the keys
 //!   and a warning. Off, nothing is taken, drawn or written.
 //!
+//! - Plugins (Pause -> Options -> Plugins, pcplug.rs; `plugins=` in the file): a row after Controls opens a page with one On / Off row
+//!   per plugin of `crate::plugins` and a page for each plugin with settings; `sync` hands a changed row to `plugins` and remembers it.
+//!
 //! `RAC_PC_EXT=0` registers nothing and writes nothing (today's bit-exact path); the oracle's gates never link this file.
 use super::pcopts::{self, Lang, PcOptions};
 use super::{modcam, FieldIn};
@@ -111,8 +114,9 @@ const POOL2: u32 = BASE + 0xf00;
 /// item, its multi-choice item and that item's rows (13 + the zero record, 24 bytes each, ending at BASE + 0xbf0; prompts.rs starts at
 /// BASE + 0x1000).
 const OPT_RECS: u32 = BASE + 0x800;
-const OPT_DESC: u32 = BASE + 0x880;
-/// The Options pictures (9 records now: Graphics and Controls) live in the Controls block (`pcctl.rs`): 0x48 bytes here would reach GPAGE.
+/// The records (10 rows + the zero record) end at BASE + 0x884, so the descriptions (10 + 0) start at 0x8a0 and end at 0x8cc.
+const OPT_DESC: u32 = BASE + 0x8a0;
+/// The Options pictures (10 records now: Graphics, Controls and Plugins) live in the Controls block (`pcctl.rs`): 0x48 bytes here would reach GPAGE.
 const OPT_PICS: u32 = super::pcctl::PICS;
 pub const GPAGE: u32 = BASE + 0x900;
 const GHDR: u32 = BASE + 0xa00;
@@ -616,6 +620,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &FieldIn) -> FieldIn {
 		camopts_field(&mut m.cpu.mem, level, fin.buttons, &mut s);
 	}
 	super::pcctl::field(&mut m.cpu.mem, level, fin.buttons, &ROWS, GTAB);
+	super::pcplug::field(&mut m.cpu.mem, level, fin.buttons);
 	out
 }
 
@@ -702,6 +707,13 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 			s.opts.debug = on.then_some(true);
 			s.save();
 		}
+	}
+	// The Plugins page (pcplug.rs): a switched plugin or a changed setting is remembered (`plugins=`, `plugin.<id>=`).
+	if super::pcplug::sync(mem) {
+		for (key, value) in crate::plugins::file_values() {
+			s.opts.extra_set(&key, value);
+		}
+		s.save();
 	}
 	if let Some((keys, pad)) = super::binds::take_changes() {
 		eprintln!("retail: PC options: controls keys {} pad {}", keys.as_deref().unwrap_or("(default)"), pad.as_deref().unwrap_or("(default)"));
@@ -837,15 +849,19 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	pics.insert(GRAPHICS_ROW, planet);
 	// Controls (pcctl.rs) follows Graphics and wears the Camera row's picture.
 	pics.insert(GRAPHICS_ROW + 1, pics[4]);
+	// Plugins (pcplug.rs) follows Controls and wears the same picture.
+	pics.insert(GRAPHICS_ROW + 2, pics[4]);
 	// The list rows and their descriptions with Graphics before Quit Game.
 	let (recs, descs) = (mem.rd32(list + 0x34), mem.rd32(text + 0x34));
 	let mut rows: Vec<[u32; 3]> = (0..7).map(|i| [mem.rd32(recs + 12 * i), mem.rd32(recs + 12 * i + 4), mem.rd32(recs + 12 * i + 8)]).collect();
 	rows.insert(GRAPHICS_ROW, [ID_GRAPHICS | 3 << 16, GPAGE, 0]);
 	rows.insert(GRAPHICS_ROW + 1, [super::pcctl::ID_CONTROLS | 3 << 16, super::pcctl::PAGE_AT, 0]);
+	rows.insert(GRAPHICS_ROW + 2, [super::pcplug::ID_PLUGINS | 3 << 16, super::pcplug::PAGE_AT, 0]);
 	rows.push([0; 3]);
 	let mut desc: Vec<u32> = (0..7).map(|i| mem.rd32(descs + 4 * i)).collect();
 	desc.insert(GRAPHICS_ROW, ID_GRAPHICS_DESC);
 	desc.insert(GRAPHICS_ROW + 1, super::pcctl::ID_DESC);
+	desc.insert(GRAPHICS_ROW + 2, super::pcplug::ID_DESC);
 	desc.push(0);
 	for (i, r) in rows.iter().enumerate() {
 		for (k, w) in r.iter().enumerate() {
@@ -899,6 +915,8 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	super::pcctl::build_gfx(mem, GTAB, &ROWS, HUD_SHARP.load(Ordering::Relaxed));
 	// The Controls page, from the same Camera Options items.
 	super::pcctl::build_page(mem, cp, hdr, val, sound_seq);
+	// The Plugins page, from the same items.
+	super::pcplug::build_page(mem, cp, hdr, val, sound_seq);
 	mem.wr32(text + 0x34, OPT_DESC);
 	mem.wr32(pic + 0x30, OPT_PICS);
 	mem.wr32(list + 0x34, OPT_RECS);
@@ -1056,6 +1074,11 @@ fn text_hook(c: &mut Cpu) -> bool {
 	if (0x7f40..super::pcctl::ID_LAST).contains(&id) || (super::pcctl::ID_DBG0..super::pcctl::ID_DBG_END).contains(&id) {
 		let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
 		return super::pcctl::text_hook(c, id, lang);
+	}
+	// The Plugins page's texts (pcplug.rs).
+	if (super::pcplug::ID_PLUGINS..super::pcplug::ID_END).contains(&id) {
+		let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
+		return super::pcplug::text_hook(c, id, lang);
 	}
 	// Not one of ours: the keyboard's button prompts (prompts.rs) or retail's own lookup.
 	let Some(k) = NEW_IDS.iter().position(|&n| n == id) else { return super::prompts::lookup(c) };
@@ -1945,14 +1968,15 @@ mod tests {
 		assert_eq!(mem.rd32(list + 0x34), OPT_RECS);
 		assert_eq!(mem.rd32(text + 0x34), OPT_DESC);
 		assert_eq!(mem.rd32(pic + 0x30), OPT_PICS);
-		let ids: Vec<u32> = (0..10).map(|i| mem.rd32(OPT_RECS + 12 * i) & 0xffff).collect();
-		assert_eq!(ids, [0x4f1e, 0x4f1f, 0x4f20, 0x4f22, 0x4f23, 0x4f24, ID_GRAPHICS, super::super::pcctl::ID_CONTROLS, 0x4f26, 0]);
+		let ids: Vec<u32> = (0..11).map(|i| mem.rd32(OPT_RECS + 12 * i) & 0xffff).collect();
+		assert_eq!(ids, [0x4f1e, 0x4f1f, 0x4f20, 0x4f22, 0x4f23, 0x4f24, ID_GRAPHICS, super::super::pcctl::ID_CONTROLS, super::super::pcplug::ID_PLUGINS, 0x4f26, 0]);
+		assert_eq!((mem.rd32(OPT_RECS + 96) >> 16, mem.rd32(OPT_RECS + 100)), (3, super::super::pcplug::PAGE_AT), "type 3: go to the Plugins page");
 		assert_eq!((mem.rd32(OPT_RECS + 84) >> 16, mem.rd32(OPT_RECS + 88)), (3, super::super::pcctl::PAGE_AT), "type 3: go to the Controls page");
 		assert_eq!((mem.rd32(OPT_RECS + 72) >> 16, mem.rd32(OPT_RECS + 76)), (3, GPAGE), "type 3: go to the Graphics page");
-		let desc: Vec<u32> = (0..10).map(|i| mem.rd32(OPT_DESC + 4 * i)).collect();
-		assert_eq!(desc, [0x4f31, 0x4f32, 0x4f33, 0x4f35, 0x4f36, 0x4f37, ID_GRAPHICS_DESC, super::super::pcctl::ID_DESC, 0x4f39, 0]);
+		let desc: Vec<u32> = (0..11).map(|i| mem.rd32(OPT_DESC + 4 * i)).collect();
+		assert_eq!(desc, [0x4f31, 0x4f32, 0x4f33, 0x4f35, 0x4f36, 0x4f37, ID_GRAPHICS_DESC, super::super::pcctl::ID_DESC, super::super::pcplug::ID_DESC, 0x4f39, 0]);
 		// Pictures: the retail seven around help_ss 5 (the record just below options_ss 0 is help_ss 6) and the Camera row's picture for Controls.
-		assert_eq!(mem.rd32(OPT_PICS + 8 * 8), mem.rd32(0x138040 + 8 * 6));
+		assert_eq!(mem.rd32(OPT_PICS + 8 * 9), mem.rd32(0x138040 + 8 * 6));
 		assert_eq!((mem.rd32(OPT_PICS + 8 * 7), mem.rd32(OPT_PICS + 8 * 7 + 4)), (mem.rd32(OPT_PICS + 8 * 4), mem.rd32(OPT_PICS + 8 * 4 + 4)));
 		assert_eq!(mem.rd32(OPT_PICS + 8 * 6), mem.rd32(0x138040 - 0x10));
 		assert_ne!(mem.rd32(OPT_PICS + 8 * 6 + 4), 0);
