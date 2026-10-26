@@ -224,8 +224,6 @@ pub enum Page {
 	Video,
 	/// [PC] Graphics Options on the title (retail/pcext.rs `title_options`): the pause menu's Graphics rows.
 	Graphics,
-	/// [PC] Plugins on the title (retail/pcplug.rs `build_title`): each plugin On / Off and its settings.
-	Plugins,
 	/// Sound Options: shared by the title and the pause menu (same item set).
 	Sound,
 	/// The pause root (Start in play) and its pages.
@@ -255,21 +253,6 @@ pub enum Page {
 	/// Ship travel: the Galactic Map page 0xf and its details page 0x10 (level_transition.md).
 	Galactic,
 	GalacticInfo,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-	Up,
-	Down,
-	Left,
-	Right,
-	/// Cross.
-	Confirm,
-	/// Triangle.
-	Back,
-	Circle,
-	/// Start (and Select/R3 on the map): closes the pause menu from any page.
-	Start,
 }
 
 /// What the mouse pointer is over on a page (port extra, `Menu::point`).
@@ -561,7 +544,7 @@ fn layout(page: Page, n: usize, in_game: bool) -> Layout {
 		Page::Language => l(&[[175.0, 23.0, 163.0, 47.0], [181.0, 119.0, 151.0, 176.0], TITLE_BACK], Rows::Column([181.0, 119.0, 151.0, 176.0])),
 		Page::Video => l(&[[155.0, 23.0, 203.0, 47.0], [58.0, 170.0, 396.0, 62.0], TITLE_BACK], Rows::Column([58.0, 170.0, 396.0, 62.0])),
 		// Video's header and back panels, the Sound page's value panel (pcext.rs `title_options` copies its slot-3 sequence).
-		Page::Graphics | Page::Plugins => l(&[[155.0, 23.0, 203.0, 47.0], [47.0, 125.0, 419.0, 164.0], TITLE_BACK], Rows::Column([47.0, 125.0, 419.0, 164.0])),
+		Page::Graphics => l(&[[155.0, 23.0, 203.0, 47.0], [47.0, 125.0, 419.0, 164.0], TITLE_BACK], Rows::Column([47.0, 125.0, 419.0, 164.0])),
 		Page::Sound if in_game => l(&[OPTION_TITLE, [53.0, 127.0, 406.0, 164.0], GAME_BACK], Rows::Column([53.0, 127.0, 406.0, 164.0])),
 		Page::Sound => l(&[[155.0, 23.0, 203.0, 47.0], [47.0, 125.0, 419.0, 164.0], [191.0, 346.0, 131.0, 78.0]], Rows::Column([47.0, 125.0, 419.0, 164.0])),
 		Page::NewGame | Page::LoadGame => {
@@ -624,7 +607,7 @@ fn slot_seqs(page: Page, in_game: bool) -> Option<([u8; 14], bool)> {
 		Page::Options => (park(&[0, 1, 0xbe, 0xbf, 0xc0]), false),
 		Page::Language => (park(&[0, 1, 0xc1, 0xc2, 0xc3]), false),
 		Page::Video => (park(&[0, 1, 0xca, 0xcb, 0xc3]), false),
-		Page::Graphics | Page::Plugins => (park(&[0, 1, 0xca, 0xd2, 0xc3]), false),
+		Page::Graphics => (park(&[0, 1, 0xca, 0xd2, 0xc3]), false),
 		Page::Sound if in_game => (park(&[0x76, 0xd4, 0xd5, 0xd6, 0xd7]), false),
 		Page::Sound => (park(&[0, 1, 0xca, 0xd2, 0xd7]), false),
 		Page::LoadGame => (park(&[0xc4, 0xc5, 0xc6, 0xc7, 0xc8]), false),
@@ -920,7 +903,6 @@ impl Menu {
 			Page::Language => (0..5).map(|i| t(LANGUAGES + i)).collect(),
 			Page::Video => vec![(format!("{}  {}", text.get(VIDEO_MODE), text.get(if s.hz60 { HZ60 } else { HZ50 })), true)],
 			Page::Graphics => crate::retail::pcext::title_rows().into_iter().map(|(label, value)| (format!("{}  {}", text.get(label), text.get(value)), true)).collect(),
-			Page::Plugins => crate::retail::pcplug::title_rows(self.lang).into_iter().map(|(label, value)| (if value.is_empty() { label } else { format!("{label}  {value}") }, true)).collect(),
 			Page::Sound => {
 				let mut v: Vec<(String, bool)> = SOUND_ROWS.iter().map(|&id| t(id)).collect();
 				v[2].0 = format!("{}  {}", v[2].0, text.get(if s.stereo { STEREO } else { MONO }));
@@ -994,7 +976,7 @@ impl Menu {
 	pub fn in_game(&self) -> bool {
 		// The overwrite confirm entered from New Game is the front end's (retail page 0x1d4db8, viewer/front_mirror.rs).
 		let front_overwrite = self.page == Page::Overwrite && self.stack.last().is_some_and(|s| s.0 == Page::NewGame);
-		!front_overwrite && !matches!(self.page, Page::Title | Page::Root | Page::NewGame | Page::LoadGame | Page::Options | Page::Language | Page::Video | Page::Graphics | Page::Plugins) && (self.page != Page::Sound || self.stack.first().is_some_and(|s| s.0 == Page::Pause))
+		!front_overwrite && !matches!(self.page, Page::Title | Page::Root | Page::NewGame | Page::LoadGame | Page::Options | Page::Language | Page::Video | Page::Graphics) && (self.page != Page::Sound || self.stack.first().is_some_and(|s| s.0 == Page::Pause))
 	}
 
 	pub fn update(&mut self, dt: f32) {
@@ -1046,8 +1028,7 @@ impl Menu {
 			Page::Options => OPTIONS,
 			Page::Language => LANGUAGE,
 			Page::Video => VIDEO_OPTIONS,
-			Page::Graphics => crate::retail::pcext::ID_GRAPHICS_HDR,
-			Page::Plugins => crate::retail::pcplug::ID_HEADER,
+			Page::Graphics => if crate::retail::pcmods::title_open() { crate::retail::pcmods::ID_HEADER } else { crate::retail::pcext::ID_GRAPHICS_HDR },
 			Page::Sound => SOUND_OPTIONS,
 			Page::Weapons => WEAPONS,
 			Page::Gadgets => GADGETS,

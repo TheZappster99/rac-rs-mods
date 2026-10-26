@@ -15,3 +15,5 @@
 /rac-rs/src/gsfull/vu1_prog*.rs
 /rac-rs/src/gsfull/vu1aot_gen.rs
 /rac-rs/src/particles/orb_tables.rs
+# The install's mods folder (setup copies the bundled mods there, the game writes the built-in mods' manifests and active.txt)
+/mods/

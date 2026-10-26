@@ -73,33 +73,29 @@ Known problem: the debug test exe is ~2.18 GB and Windows refuses to run it (> 2
 - **`rac-rs/src/gsfull/`**: full GS/VU1 path (VU1 microcode translated to Rust, ahead-of-time).
 - Level-asset decoding (`wad.rs`, `iso.rs`, `level.rs`, `terrain.rs`, `ties.rs`, `shrubs.rs`, `mobies.rs`) reads the disc at runtime.
 
-## Plugins
+## Built-in mods (plugins)
 
-Optional PC features the player switches On / Off in Pause -> Options -> Plugins. Compiled in (no DLLs): a plugin is a Rust type
-implementing `plugins::Plugin` (`rac-rs/src/plugins.rs`) plus one entry in the `PLUGINS` list there. The plugin code itself may
-live anywhere (renderer, retail driver); it only asks `crate::plugins` whether it is on. New optional features should be plugins
-rather than new env vars or new Options rows.
+Optional PC features compiled into the game (no DLLs, no scripts) that the player switches On / Off like any other mod: in the
+RAC-RS Launcher's Mods page or on the title screen under Options -> Mods (`retail/pcmods.rs`, upstream's page). A built-in mod is a
+Rust type implementing `plugins::Plugin` (`rac-rs/src/plugins.rs`) plus one entry in the `PLUGINS` list there. Its code may live
+anywhere (renderer, retail driver); it only asks `crate::plugins` whether it is on. New optional features should be built-in mods
+rather than new env vars or new Options rows. Do not add menu pages of our own: upstream's Mods page owns `BASE+0xC000..0xD800` and
+text ids `0x7fc0..0x8000` (our `titlequit.rs` Quit Game row uses `BASE+0xE000..0xE200`).
 
-- **Kinds**: a *live* plugin (default) follows the menu at once: check `plugins::on("id")`, react in `on_change` / `on_setting`,
-  or do per-tick work in `pre_field(&mut Machine)` (runs before each level field while on, after modcam/strafe/aim). A *restart*
-  plugin (`needs_restart() -> true`) is read once at start-up with `plugins::on_at_start("id")` / `value_at_start(..)`, for
-  things fixed when the window or GPU device is made; its menu values read "... after restart" until then.
-- **Settings**: `fn settings() -> &'static [Setting]` (`id`, `name`, 2..=4 `values`, `default` index). The menu then gives the
-  plugin its own page after the On / Off list (via the "Page" stepper). Read with `plugins::value("id", "setting")` (live) or
-  `value_at_start` (restart); the result is an index into `values`.
-- **Rules** (checked by `plugin_ids_and_names_fit_the_file_and_the_menu`): ids are lower case `[a-z0-9_]`; names and values are
-  ASCII letters, digits, spaces and `-` only (the game's font; no `+`, `%`, parentheses), names <= 24 chars, values <= 16.
-  Names are shown untranslated in all five languages.
-- `env_force()` names a `RAC_...` var that forces the plugin on when `=1` (keeps old dev switches working, e.g. `RAC_RT_SHADOWS`).
-- **Saved** in `player/pc_options.txt`: `plugins=id:on,...` and `plugin.<id>=setting:value,...` (only values off their default;
-  unknown entries are kept). `retail/pcext.rs` `sync` writes them via `plugins::file_values()`; `plugins.rs` reads the file
-  itself on first use, so the renderer may ask before the retail driver starts.
-- **Menu internals** (`retail/pcplug.rs`): the page is a copy of the retail Camera Options page patched into reserved PS2 RAM like
-  the Graphics / Controls pages (`pcext.rs` `patch_graphics` adds the Options row after Controls). Reserved RAM `BASE+0xC000..
-  0xE000`, text ids `0x7fb0..0x8000`. Max 7 rows per page, 4 values per row. The title screen has it too (Options -> Plugins
-  after Graphics, `pcplug::build_title`): one flat list of up to 13 rows (each plugin, then its settings as "- Name"), drawn by the
-  native mirror (`frontend.rs` `Page::Plugins` via `pcplug::title_rows`). The title's value item only flips a byte, so a setting
-  row steps to its next value on any change. `pcplug::sync` reads only the title page on the title and only the pause page in a level.
+- **How it plugs into the mods system**: on first use `plugins.rs` writes `mods/<id>/omni-mod.json` for each built-in mod (format 2,
+  `"type": "script"` because the launcher accepts only script / native, no scripts, `"builtin": true`; rewritten only when it
+  differs). `omni/load.rs` `start` drops built-in ids before planning, so OmniLoader never sees them (and is not even loaded when
+  only built-in mods are on).
+- **On / Off**: the mod's id line in `mods/active.txt` under the "Load mods" master (`omni::plugins::active_ids`; no line = off).
+  **Settings**: `mods/settings.json` under the mod's id, stored by value name (lower case, spaces as `-`). Both are read once at
+  start-up (`plugins::on_at_start("id")`, `value_at_start("id", "setting")` -> index into `values`): mods change at the next start.
+  `pre_field(&mut Machine)` runs before each level field for the mods that are on (after modcam/strafe/aim).
+- **Settings shape**: `fn settings() -> &'static [Setting]` (`id`, `name`, 2..=4 `values`, `default` index), written into the
+  manifest as `choice` settings, so the launcher and the title's Mods page show them.
+- **Rules** (checked by `plugin_ids_and_names_fit_the_file_and_the_menu`): ids are the loader's mod ids (lower case letters and
+  digits joined by single hyphens, e.g. `rt-shadows`); setting ids `[a-z0-9_]`; names and values are ASCII letters, digits,
+  spaces and `-` only (the game's font), names <= 24 chars, values <= 16. Every mod has a `description()` for the launcher.
+- `env_force()` names a `RAC_...` var that forces the mod on when `=1` (keeps old dev switches working, e.g. `RAC_RT_SHADOWS`).
 
 ## Dev env vars
 
@@ -111,7 +107,7 @@ rather than new env vars or new Options rows.
 ## In-progress work
 
 `RT_SHADOWS_PLAN.md` describes an uncommitted ray-traced sun shadow prototype (`rac-rs/src/viewer/rtshadow.rs`, enabled with
-the "Ray-traced shadows" restart plugin or `RAC_RT_SHADOWS=1`, Vulkan + `EXPERIMENTAL_RAY_QUERY` only). Read it before touching shadows. `build\release\rac-rs.orig.exe`
+the "Ray-traced shadows" built-in mod (`rt-shadows`) or `RAC_RT_SHADOWS=1`, Vulkan + `EXPERIMENTAL_RAY_QUERY` only). Read it before touching shadows. `build\release\rac-rs.orig.exe`
 is the untouched exe kept for A/B comparison.
 
 ## Conventions

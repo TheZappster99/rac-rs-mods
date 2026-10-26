@@ -1,4 +1,4 @@
-//! [PC] Enhanced image (Pause -> Options -> Graphics -> Lighting Enhanced, retail/pcext.rs `graphics`; no retail
+//! [PC] Enhanced image (Pause -> Options -> Graphics -> Lighting Enhanced, retail/pcext.rs `graphics`; Split view: hangs on `DrawFrame.post_on` = `splitview::fx`; no retail
 //! counterpart). With Lighting Classic nothing here runs and the frame is drawn exactly as before.
 //!
 //! The level pass resolves its MSAA colour into `scene` instead of the window; then, before any HUD or menu is drawn:
@@ -16,7 +16,7 @@
 //!   out) plus, with Particles Enhanced, the additive particles' glow target (partfx.rs) down a chain of five half sizes and back up with a tent filter;
 //! - Sun rays On: `fs_rmask` keeps the bright sky around the key light's screen position (half size), `fs_rays` blurs it
 //!   radially towards that point (48 taps, decaying), so light shafts stream past whatever stands in front of the sky;
-//! - Ray-traced sun rays (rtrays.rs, a plugin): in place of `fs_rmask` / `fs_rays`, traced light shafts in the air between
+//! - Ray-traced sun rays (rtrays.rs, a built-in mod): in place of `fs_rmask` / `fs_rays`, traced light shafts in the air between
 //!   `encode` and `composite`, written into the same two targets (`rays_io`); the composite adds them the same way;
 //! - `fs_comp`, its own pass into every sample of the MSAA target: contrast-adaptive sharpening of the scene, the occlusion
 //!   (depth-aware upsample), the bloom, then a filmic grade in linear light (gentle contrast around mid grey, a soft shoulder
@@ -42,6 +42,8 @@ struct P { size: vec4<f32>, half: vec4<f32>, proj: vec4<f32>, params: vec4<f32>,
 @group(0) @binding(9) var gi_in: texture_2d<f32>;
 @group(0) @binding(10) var wpos_in: texture_2d<f32>;
 @group(0) @binding(11) var prew_in: texture_2d<f32>;
+// [PC] How much of each pixel the volumetric fog hides (1 - its transmittance; 0 without the fog: volfog.rs `fs_apply`).
+@group(0) @binding(12) var fogc_in: texture_2d<f32>;
 
 struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -327,14 +329,14 @@ fn luma(c: vec3<f32>) -> f32 {
 	return vec4<f32>(c, 1.0);
 }
 
-// p.sun = (key light's screen uv, ray strength, 0): the sky's bright part near it (sky pixels only, so the ground and every
-// object in front of the sky block the light).
+// p.sun = (key light's screen uv, ray strength, falloff or 0 = 5): the sky's bright part near it (sky pixels only, so the ground
+// and every object in front of the sky block the light).
 @fragment fn fs_rmask(v: VO) -> @location(0) vec4<f32> {
 	let z = textureLoad(lin, clamp(vec2<i32>(v.pos.xy), vec2<i32>(0), vec2<i32>(textureDimensions(lin)) - vec2<i32>(1)), 0).r;
 	if (!sky(z)) { return vec4<f32>(0.0); }
 	let c = to_linear(textureSampleLevel(scene, lsamp, v.uv, 0.0).rgb);
 	let d = length((v.uv - p.sun.xy) * vec2<f32>(p.size.x * p.size.w, 1.0));
-	let near_sun = exp(-d * d * 5.0);
+	let near_sun = exp(-d * d * select(5.0, p.sun.w, p.sun.w > 0.0));
 	return vec4<f32>(c * smoothstep(0.2, 0.7, luma(c)) * near_sun, 1.0);
 }
 
@@ -503,6 +505,9 @@ fn scene_at(c: vec2<i32>, dim: vec2<i32>, off: vec2<f32>) -> vec3<f32> {
 	let wt = amp * peak;
 	var c = clamp((e + (n + s + w + ea) * wt) / (1.0 + 4.0 * wt), vec3<f32>(0.0), vec3<f32>(1.0));
 	var l = to_linear(c);
+	// The occlusion and the bounce light belong to the surface, so the volumetric fog in front of it hides them too (user
+	// 2026-10-24: "the ambient occlusion in the fog looks weird").
+	let fc = textureLoad(fogc_in, c0, 0).r;
 	if (p.gi.x > 0.0) {
 		// Global illumination: the bounce light on the surface's own colour (p.gi2.x: towards its hue, so surfaces in shade
 		// catch it too) plus a faint floor; occluded with the rest below. Not on sky or the water pass's pixels.
@@ -515,14 +520,14 @@ fn scene_at(c: vec2<i32>, dim: vec2<i32>, off: vec2<f32>) -> vec3<f32> {
 			let alb = mix(l, l * (0.5 / max(mx, 0.1)), p.gi2.x);
 			// The gathered light, softly held under p.gi3.y (linear: a bright object right next to a surface tints it, never lights it up).
 			let gs = gi_at(c0, z) * p.gi.x;
-			l += gs / (1.0 + max(gs.r, max(gs.g, gs.b)) / p.gi3.y) * (alb + vec3<f32>(p.gi2.y)) * mine;
+			l += gs / (1.0 + max(gs.r, max(gs.g, gs.b)) / p.gi3.y) * (alb + vec3<f32>(p.gi2.y)) * mine * (1.0 - fc);
 		}
 	}
 	if (p.params.x > 0.0) {
 		let hs = vec2<i32>(textureDimensions(lin));
 		let z = textureLoad(lin, min(c0 / 2, hs - vec2<i32>(1)), 0).r;
 		if (!sky(z)) {
-			l *= ao_at(v, z);
+			l *= mix(ao_at(v, z), 1.0, fc);
 		}
 	}
 	if (p.extra.y > 0.0) {
@@ -635,7 +640,7 @@ const GI_NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Seconds since the first call (the shimmer's clock), wrapped so the shader's sines keep their precision.
 fn seconds() -> f32 {
 	static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-	(T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() % 600.0) as f32
+	crate::viewer::test_clock::secs(|| (T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() % 600.0) as f32)
 }
 
 /// Sun rays: the direction towards the sun level `level`'s sky paints (sky mesh axes = world axes, Z up), or None for a
@@ -677,6 +682,8 @@ fn view_ao() -> bool {
 
 /// Bloom levels: 1/2 .. 1/32 of the window.
 const LEVELS: usize = 5;
+/// [PC] The volumetric fog's cover target (volfog.rs writes it).
+pub(super) const FOG_COVER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 struct Targets {
 	size: (u32, u32),
@@ -702,6 +709,8 @@ struct Targets {
 	g_rays: wgpu::BindGroup,
 	/// The depth target's depth aspect (binding 2 of every group).
 	depth_only: wgpu::TextureView,
+	/// [PC] The volumetric fog's cover (binding 12 of the composite; cleared each frame, volfog.rs writes it).
+	fogc: wgpu::TextureView,
 }
 
 /// [PC] Global illumination's grid targets (made with the first frame that asks for them, kept while the level stays on).
@@ -730,6 +739,7 @@ struct Views<'a> {
 	gi: Option<&'a wgpu::TextureView>,
 	wpos: Option<&'a wgpu::TextureView>,
 	prew: Option<&'a wgpu::TextureView>,
+	fogc: Option<&'a wgpu::TextureView>,
 }
 
 pub(super) struct Post {
@@ -759,6 +769,9 @@ pub(super) struct Post {
 	gi: Option<GiTargets>,
 	/// This frame's water pass ran: the composite reads its targets (`bind_water`).
 	gi_water: bool,
+	/// [PC] Volumetric clouds on (volclouds.rs): the sun rays gather from a tighter circle round the sun, so a sunlit cloud body
+	/// away from it streams no shaft.
+	pub(super) rays_tight: bool,
 }
 
 const LIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -790,6 +803,7 @@ impl Post {
 				tex(9, wgpu::TextureSampleType::Float { filterable: false }, false),
 				tex(10, wgpu::TextureSampleType::Float { filterable: false }, false),
 				tex(11, wgpu::TextureSampleType::Float { filterable: false }, false),
+				tex(12, float, false),
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -854,6 +868,7 @@ impl Post {
 			t: None,
 			gi: None,
 			gi_water: false,
+			rays_tight: false,
 		}
 	}
 
@@ -880,7 +895,7 @@ impl Post {
 		let (Some(t), Some(g), Some((wpos, copy))) = (&self.t, &self.gi, mask) else { return };
 		if g.g_comp_w.as_ref().is_none_or(|(v, c, _)| v != wpos || c != copy) {
 			let prew = copy.create_view(&Default::default());
-			let group = self.bind(device, &self.ubuf, t, &t.scene, Views { lin: Some(&t.lin), ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&g.gi[0]), wpos: Some(wpos), prew: Some(&prew) });
+			let group = self.bind(device, &self.ubuf, t, &t.scene, Views { lin: Some(&t.lin), ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&g.gi[0]), wpos: Some(wpos), prew: Some(&prew), fogc: Some(&t.fogc) });
 			if let Some(g) = &mut self.gi {
 				g.g_comp_w = Some((wpos.clone(), copy.clone(), group));
 			}
@@ -914,6 +929,7 @@ impl Post {
 				tv(9, v.gi.unwrap_or(d)),
 				tv(10, v.wpos.unwrap_or(d32)),
 				tv(11, v.prew.unwrap_or(d)),
+				tv(12, v.fogc.unwrap_or(d)),
 			],
 		})
 	}
@@ -944,7 +960,7 @@ impl Post {
 			g_src: self.bind(device, &self.ubuf, t, &t.scene, Views { lin, ..Default::default() }),
 			g_gi: self.bind(device, &self.ubuf, t, &t.scene, Views { lin, ao: Some(&src[1]), bloom: Some(&src[0]), ..Default::default() }),
 			g_blur: [self.bind(device, &self.ubuf, t, &t.scene, Views { lin, gi: Some(&gi[0]), ..Default::default() }), self.bind(device, &self.ubuf_v, t, &t.scene, Views { lin, gi: Some(&gi[1]), ..Default::default() })],
-			g_comp: self.bind(device, &self.ubuf, t, &t.scene, Views { lin, ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&gi[0]), ..Default::default() }),
+			g_comp: self.bind(device, &self.ubuf, t, &t.scene, Views { lin, ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&gi[0]), fogc: Some(&t.fogc), ..Default::default() }),
 			g_comp_w: None,
 			src,
 			gi,
@@ -959,6 +975,11 @@ impl Post {
 	/// The scene, the half-size linear depth and the targets' generation, for the water pass (after `prepare`).
 	pub(super) fn glow(&self) -> Option<&wgpu::TextureView> {
 		self.t.as_ref().map(|t| &t.glow)
+	}
+
+	/// [PC] The volumetric fog's cover target (after `prepare`; volfog.rs draws `1 - transmittance` into it).
+	pub(super) fn fog_cover(&self) -> Option<&wgpu::TextureView> {
+		self.t.as_ref().map(|t| &t.fogc)
 	}
 
 	pub(super) fn water_inputs(&self) -> Option<(&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView, u64)> {
@@ -1023,6 +1044,7 @@ impl Post {
 			})
 		};
 		let rays = [ray_tex("post ray mask").create_view(&Default::default()), ray_tex("post rays").create_view(&Default::default())];
+		let fogc = make("post fog cover", w, h, FOG_COVER_FORMAT, 1).create_view(&Default::default());
 		let group = |buf: &wgpu::Buffer, v: Views| self.bind_d(device, buf, &depth_only, &scene, v);
 		let l = Some(&lin);
 		Targets {
@@ -1032,7 +1054,7 @@ impl Post {
 			g_bright: group(&self.ubuf, Views { lin: l, glow: Some(&glow), ..Default::default() }),
 			g_down: (1..LEVELS).map(|m| group(&self.ubuf, Views { lin: l, bloom: Some(&bloom[m - 1]), ..Default::default() })).collect(),
 			g_up: (1..LEVELS).map(|m| group(&self.ubuf, Views { lin: l, bloom: Some(&bloom[m]), ..Default::default() })).collect(),
-			g_comp: group(&self.ubuf, Views { lin: l, ao: Some(&ao[0]), bloom: Some(&bloom[0]), glow: Some(&glow), rays: Some(&rays[1]), ..Default::default() }),
+			g_comp: group(&self.ubuf, Views { lin: l, ao: Some(&ao[0]), bloom: Some(&bloom[0]), glow: Some(&glow), rays: Some(&rays[1]), fogc: Some(&fogc), ..Default::default() }),
 			g_rmask: group(&self.ubuf, Views { lin: l, ..Default::default() }),
 			g_rays: group(&self.ubuf, Views { lin: l, bloom: Some(&rays[0]), ..Default::default() }),
 			size: (w, h),
@@ -1047,6 +1069,7 @@ impl Post {
 			bloom,
 			rays,
 			depth_only,
+			fogc,
 		}
 	}
 
@@ -1077,7 +1100,7 @@ impl Post {
 			// (Traced rays carry their own strength: the composite adds them as they are.)
 			sun: match traced_rays {
 				true => [0.0, 0.0, 1.0, 0.0],
-				false => sun.map_or([0.0; 4], |(uv, s)| [uv[0], uv[1], s * RAYS, 0.0]),
+				false => sun.map_or([0.0; 4], |(uv, s)| [uv[0], uv[1], s * RAYS, if self.rays_tight { crate::devtune::f32("cl_rays", 24.0) } else { 0.0 }]),
 			},
 			cam: {
 				let f = forward(cam);
@@ -1106,7 +1129,7 @@ impl Post {
 				label: Some(label),
 				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load, store: wgpu::StoreOp::Store } })],
 				depth_stencil_attachment: None,
-				timestamp_writes: None,
+				timestamp_writes: crate::viewer::passtime::rw(label),
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});
@@ -1121,12 +1144,14 @@ impl Post {
 			run(enc, "post ao across", &t.ao[1], &self.p_blur, &t.g_blur[0], clear);
 			run(enc, "post ao down", &t.ao[0], &self.p_blur, &t.g_blur[1], clear);
 		}
+		// No fog cover unless the volumetric fog draws one in `mid`.
+		drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("post fog cover clear"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &t.fogc, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store } })], depth_stencil_attachment: None, timestamp_writes: crate::viewer::passtime::rw("post fog cover clear"), occlusion_query_set: None, multiview_mask: None }));
 		mid(enc, &t.scene, ao.then_some(&t.ao[0]));
 		if let Some(g) = gi {
 			// The grid's cells (colour and normal at once), the gather, its blur across and down.
 			let at = |view| Some(wgpu::RenderPassColorAttachment { view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store } });
 			let pass = |enc: &mut wgpu::CommandEncoder, label: &str, targets: &[Option<wgpu::RenderPassColorAttachment>], pipeline: &wgpu::RenderPipeline, group: &wgpu::BindGroup| {
-				let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some(label), color_attachments: targets, depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None });
+				let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some(label), color_attachments: targets, depth_stencil_attachment: None, timestamp_writes: crate::viewer::passtime::rw(label), occlusion_query_set: None, multiview_mask: None });
 				pass.set_pipeline(pipeline);
 				pass.set_bind_group(0, group, &[]);
 				pass.draw(0..3, 0..1);
@@ -1163,7 +1188,7 @@ impl Post {
 			label: Some("post composite"),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: msaa, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
 			depth_stencil_attachment: None,
-			timestamp_writes: None,
+			timestamp_writes: crate::viewer::passtime::rw("post composite"),
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});

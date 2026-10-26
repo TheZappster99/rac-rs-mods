@@ -1,4 +1,4 @@
-//! [PC] Ray-traced sun rays (Pause -> Options -> Plugins -> Ray-traced sun rays, read at start-up; RAC_RT_RAYS=1 forces it on).
+//! [PC] Ray-traced sun rays (the built-in mod Ray-traced sun rays, plugins.rs: Mods in the launcher or on the title, read at start-up; RAC_RT_RAYS=1 forces it on).
 //! No retail counterpart. They take the place of the screen-space Sun rays (post.rs `fs_rmask` / `fs_rays`) while the level's
 //! ray-tracing structure (rtshadow.rs) is built, with Lighting Enhanced, Dynamic shadows and Sun rays on; otherwise the
 //! screen-space ones draw as before.
@@ -11,14 +11,14 @@
 //! - `cs_blur`: a depth-aware 5x5 blur of that into post.rs's rays target, which the composite adds over the picture as the
 //!   screen-space rays did. Mobies cast no shafts yet (rtshadow.rs phase 4).
 //!
-//! The ray-tracing device and structure come up when either this plugin or Ray-traced shadows is on at start-up; this plugin
+//! The ray-tracing device and structure come up when either this mod or Ray-traced shadows is on at start-up; this mod
 //! alone leaves the shadows to the cascades (rtshadow.rs `shadows`).
 
 use super::*;
 
-/// The Ray-traced sun rays plugin (read at start-up: the ray-tracing device feature is requested when the window opens).
+/// The Ray-traced sun rays built-in mod (read at start-up: the ray-tracing device feature is requested when the window opens).
 pub(super) fn wanted() -> bool {
-	crate::plugins::on_at_start("rt_sun_rays")
+	crate::plugins::on_at_start("rt-sun-rays")
 }
 
 /// How far the view ray is marched into the sky (world units).

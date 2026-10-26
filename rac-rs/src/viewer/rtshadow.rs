@@ -15,7 +15,7 @@
 //!   shadow in the mask lags one frame.
 //! - Receivers: `sun_occ` (viewer.rs SHADER, rewritten by `shader`) projects its world point into the last frame's mask and
 //!   takes the mean of the 3x3 pixels whose depth matches; with fewer than 3 (off screen, newly revealed, a see-through layer in
-//!   front) it traces one ray of its own, out to `REACH`. Until the level's structure is built (`u.sun_q.w` 0) it reads the
+//!   front) it traces one ray of its own, out to `REACH`. Until the level's structure is built (`rt_view.sun.w` 0) it reads the
 //!   cascades, which still draw for the shaders that do not trace.
 
 use super::*;
@@ -31,14 +31,14 @@ const BITS_CAP: usize = 8 << 20;
 /// `rt_tris` header: the first cut triangle of each geometry (vec4 0 and 1); a triangle's record follows at 2 + 2 * index.
 const MAX_GEOS: usize = 8;
 
-/// Set once the device has ray queries and a ray-traced plugin is on (`enable`); batches created after it carry `usage`.
+/// Set once the device has ray queries and a ray-traced built-in mod is on (`enable`); batches created after it carry `usage`.
 static ON: AtomicBool = AtomicBool::new(false);
-/// Set with `ON` when the Ray-traced shadows plugin is the one on: the receivers trace (`shadows`).
+/// Set with `ON` when the Ray-traced shadows mod is the one on: the receivers trace (`shadows`).
 static SHADOWS: AtomicBool = AtomicBool::new(false);
 
-/// The Ray-traced shadows plugin (Pause -> Options -> Plugins, read at start-up; RAC_RT_SHADOWS=1 still forces it on).
+/// The Ray-traced shadows built-in mod (plugins.rs: Mods in the launcher or on the title, read at start-up; RAC_RT_SHADOWS=1 still forces it on).
 fn wanted_shadows() -> bool {
-	crate::plugins::on_at_start("rt_shadows")
+	crate::plugins::on_at_start("rt-shadows")
 }
 
 /// The level's structure is wanted by the shadows or by the sun rays (rtrays.rs).
@@ -74,7 +74,7 @@ pub(super) fn on() -> bool {
 	ON.load(Ordering::Relaxed)
 }
 
-/// The shadow receivers trace (the level shader variant, its bindings 3..7 and the shadow mask pass).
+/// The shadow receivers trace (the level shader variant, its bindings 4..8 and the shadow mask pass).
 pub(super) fn shadows() -> bool {
 	SHADOWS.load(Ordering::Relaxed)
 }
@@ -87,7 +87,8 @@ pub(super) fn usage(u: wgpu::BufferUsages) -> wgpu::BufferUsages {
 	}
 }
 
-/// The level's group-0 layout entries past the cascades (bindings 3..7), none while ray tracing is off.
+/// The level's group-0 layout entries past the cascades and the soft fog buffer (bindings 4..8; 3 is volfog/soft.rs), none while
+/// ray tracing is off.
 pub(super) fn layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
 	if !shadows() {
 		return Vec::new();
@@ -95,7 +96,7 @@ pub(super) fn layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
 	let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
 	let storage = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None };
 	let uniform = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None };
-	vec![entry(3, wgpu::BindingType::AccelerationStructure { vertex_return: false }), entry(4, storage), entry(5, storage), entry(6, uniform), entry(7, storage)]
+	vec![entry(4, wgpu::BindingType::AccelerationStructure { vertex_return: false }), entry(5, storage), entry(6, storage), entry(7, uniform), entry(8, storage)]
 }
 
 /// The level shader with `sun_occ` reading the shadow mask and tracing where it has none (the cascade read stays as
@@ -107,6 +108,11 @@ pub(super) fn shader(src: &str) -> String {
 	assert!(src.contains(OCC) && src.contains(MOBY), "rt shadows: the level shader has no sun_occ or sun_lit");
 	let src = src.replacen(OCC, "fn sun_occ_map(p: vec3<f32>) -> f32 {", 1).replacen(MOBY, "sun_occ_moby(i.w)", 1);
 	format!("enable wgpu_ray_query;\n{}\n{}{}{}", src, RT_LEVEL, rt_fns(), RT_OCC)
+}
+
+/// The level shader `src` as the device runs it: `shader(src)` while the receivers trace, else unchanged.
+pub(super) fn level(src: String) -> String {
+	if shadows() { shader(&src) } else { src }
 }
 
 /// The mask pass's shader (`cs_mask`).
@@ -141,15 +147,15 @@ struct RtView {
 }
 
 const RT_LEVEL: &str = r#"
-@group(0) @binding(3) var sun_tlas: acceleration_structure;
+@group(0) @binding(4) var sun_tlas: acceleration_structure;
 // Texel-alpha casters (rtshadow.rs): header (first cut triangle per geometry), then per triangle (uv0, uv1), (uv2, mask word
 // offset, mask w | h << 16); the masks, one bit per texel (1 = casts).
-@group(0) @binding(4) var<storage, read> rt_tris: array<vec4<u32>>;
-@group(0) @binding(5) var<storage, read> rt_bits: array<u32>;
+@group(0) @binding(5) var<storage, read> rt_tris: array<vec4<u32>>;
+@group(0) @binding(6) var<storage, read> rt_bits: array<u32>;
 // The shadow mask of the last frame and its camera (rtshadow.rs `mask`): per pixel (shadow, view depth) as two f16.
 struct RtView { eye: vec4<f32>, f: vec4<f32>, r: vec4<f32>, u: vec4<f32>, size: vec4<f32>, sun: vec4<f32> };
-@group(0) @binding(6) var<uniform> rt_view: RtView;
-@group(0) @binding(7) var<storage, read> rt_mask: array<u32>;
+@group(0) @binding(7) var<uniform> rt_view: RtView;
+@group(0) @binding(8) var<storage, read> rt_mask: array<u32>;
 "#;
 
 const RT_MASK: &str = r#"
@@ -261,10 +267,10 @@ fn rt_mask_at(p: vec3<f32>) -> f32 {
 	return select(-1.0, s / max(n, 1.0), n >= 3.0);
 }
 
-// [PC] Ray-traced sun shadows (rtshadow.rs; u.sun_q.w = 1 once the level's structure is built): the soft shadow of the mask
-// where it holds p, else one ray of its own.
+// [PC] Ray-traced sun shadows (rtshadow.rs; rt_view.sun.w = 1 once the level's structure is built; u.sun_q.w is texfilter.wgsl's):
+// the soft shadow of the mask where it holds p, else one ray of its own.
 fn sun_occ(p: vec3<f32>) -> f32 {
-	if (u.sun_q.w < 0.5) { return sun_occ_map(p); }
+	if (rt_view.sun.w < 0.5) { return sun_occ_map(p); }
 	let m = rt_mask_at(p);
 	if (m >= 0.0) { return m; }
 	return rt_ray(p, -normalize(u.sun.xyz), 0.03 + 0.004 * distance(p, u.eye.xyz));
@@ -274,7 +280,7 @@ fn sun_occ(p: vec3<f32>) -> f32 {
 // the moving casters hold its own shape, and the moby lighting's wrap lights the far side the sun does not reach, which its
 // own shadow took away (the player turned dark all over in the sun).
 fn sun_occ_moby(p: vec3<f32>) -> f32 {
-	if (u.sun_q.w < 0.5) { return sun_occ_map(p); }
+	if (rt_view.sun.w < 0.5) { return sun_occ_map(p); }
 	return rt_ray_masked(p, -normalize(u.sun.xyz), 0.03 + 0.004 * distance(p, u.eye.xyz), 1u);
 }
 "#;
@@ -423,7 +429,7 @@ struct Geo<'a> {
 	count: u32,
 }
 
-/// The level's structure: the top level (one instance, identity), bound at group 0 binding 3, the texel-alpha tables at 4 and 5,
+/// The level's structure: the top level (one instance, identity), bound at the level's group 0 binding 4, the texel-alpha tables at 5 and 6,
 /// and the static world's bottom level.
 pub(super) struct RtShadow {
 	pub tlas: wgpu::Tlas,
@@ -476,7 +482,9 @@ impl RtShadow {
 	#[allow(clippy::too_many_arguments)]
 	pub(super) fn mask(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, cam: &Camera, aspect: f32, range: (f32, f32), dir: [f32; 3], size: (u32, u32)) {
 		if self.blas.is_none() || (size.0 as usize) * (size.1 as usize) > MASK_CAP {
-			queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&RtView::zeroed()));
+			// No mask (eye.w 0), but a built structure still traces in the fragment shaders (sun.w).
+			let v = RtView { sun: [0.0, 0.0, 0.0, self.built() as u8 as f32], ..RtView::zeroed() };
+			queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&v));
 			return;
 		}
 		let _s = super::profile::span("rt_mask");
@@ -489,7 +497,8 @@ impl RtShadow {
 			r: [r[0], r[1], r[2], range.1],
 			u: [u[0], u[1], u[2], 0.0],
 			size: [size.0 as f32, size.1 as f32, cam.tan_half * aspect, cam.tan_half],
-			sun: [dir[0], dir[1], dir[2], 0.0],
+			// w: the structure is built (the receivers trace; it is, past the check above).
+			sun: [dir[0], dir[1], dir[2], 1.0],
 		};
 		queue.write_buffer(&self.view_next, 0, bytemuck::bytes_of(&v));
 		if self.mask_bind.as_ref().is_none_or(|(d, _)| d != depth) {
@@ -539,14 +548,14 @@ impl RtShadow {
 		}
 	}
 
-	/// The level's group-0 entries for bindings 3..7.
+	/// The level's group-0 entries for bindings 4..8 (3 is volfog/soft.rs).
 	pub(super) fn entries(&self) -> [wgpu::BindGroupEntry<'_>; 5] {
 		[
-			wgpu::BindGroupEntry { binding: 3, resource: self.tlas.as_binding() },
-			wgpu::BindGroupEntry { binding: 4, resource: self.tris.as_entire_binding() },
-			wgpu::BindGroupEntry { binding: 5, resource: self.bits.as_entire_binding() },
-			wgpu::BindGroupEntry { binding: 6, resource: self.view.as_entire_binding() },
-			wgpu::BindGroupEntry { binding: 7, resource: self.mask.as_entire_binding() },
+			wgpu::BindGroupEntry { binding: 4, resource: self.tlas.as_binding() },
+			wgpu::BindGroupEntry { binding: 5, resource: self.tris.as_entire_binding() },
+			wgpu::BindGroupEntry { binding: 6, resource: self.bits.as_entire_binding() },
+			wgpu::BindGroupEntry { binding: 7, resource: self.view.as_entire_binding() },
+			wgpu::BindGroupEntry { binding: 8, resource: self.mask.as_entire_binding() },
 		]
 	}
 
@@ -727,11 +736,13 @@ impl RtShadow {
 mod tests {
 	#[test]
 	fn traced_level_shader_validates() {
-		let s = super::shader(super::super::SHADER);
+		// As gpu/setup.rs builds it: the soft fog's level source (its binding 3), then the traced variant (4..8).
+		let level = super::super::volfog::soft::level_source(super::super::SHADER, false);
+		let s = super::shader(&level);
 		assert!(s.contains("fn sun_occ_map(p: vec3<f32>)") && s.contains("RayDesc(") && s.contains(", 200.0, p,"));
 		let m = naga::front::wgsl::parse_str(&s).expect("rt wgsl parse");
 		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("rt wgsl validate");
-		let b = super::shader(&super::super::bindless::shader_source(super::super::SHADER));
+		let b = super::shader(&super::super::bindless::shader_source(&level));
 		naga::front::wgsl::parse_str(&b).expect("rt bindless wgsl parse");
 	}
 
