@@ -713,6 +713,10 @@ crate::loadlog::say(|| "host: moby classes done".into());
 					})
 				});
 			}
+			// Ragdoll Ratchet measuring dump (retail/ragdoll.rs): inert unless RAC_RAGDOLL_DUMP=1.
+			if let Some((c, a)) = hero_anim.as_ref() {
+				crate::retail::ragdoll::dump_skeleton(l.id, c, a);
+			}
 crate::loadlog::say(|| "host: hero anim + clips done".into());
 			let mut hero_items: HashMap<u8, HeroItem> = HashMap::new();
 			let mut hero_worn = WornSet::default();

@@ -38,6 +38,7 @@ pub mod pspad;
 pub mod vendor;
 pub mod pcopts;
 pub mod strafe;
+pub mod ragdoll;
 pub mod shipmouse;
 pub mod debugkeys;
 pub mod devtools;
@@ -3231,6 +3232,8 @@ impl Retail {
 						aim::pre_field(&mut m, &fin2);
 						// The live plugins that are on (plugins.rs).
 						crate::plugins::pre_field(&mut m);
+						// Ragdoll Ratchet measuring log (ragdoll.rs): inert unless RAC_RAGDOLL_LOG is set.
+						ragdoll::log_field(&m, field, fin.buttons);
 					} else if front {
 						// The title's Options -> Graphics rows (pcext.rs `front_field`).
 						pcext::front_field(&mut m);
