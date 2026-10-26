@@ -173,6 +173,11 @@ impl ApplicationHandler for App {
 				}
 			}
 			WindowEvent::RedrawRequested => {
+				// [PC] Quit Game on the title's main menu (retail/titlequit.rs): closes like the window's close button.
+				if crate::retail::titlequit::requested() {
+					el.exit();
+					return;
+				}
 				profile::frame_start();
 				// The run log's first frames (a freeze right after the load shows how far drawing got).
 				static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

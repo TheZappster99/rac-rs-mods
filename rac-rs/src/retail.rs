@@ -45,6 +45,7 @@ pub mod oldsim;
 pub mod mouse_menu;
 pub mod menu_keys;
 pub mod title_boot;
+pub mod titlequit;
 pub mod disc;
 pub mod disc_hands;
 pub mod disc_map;
@@ -3233,6 +3234,8 @@ impl Retail {
 					} else if front {
 						// The title's Options -> Graphics rows (pcext.rs `front_field`).
 						pcext::front_field(&mut m);
+						// The main menu's Quit Game row (titlequit.rs).
+						titlequit::front_field(&mut m.cpu.mem);
 					}
 					// Dev debug keys (retail/debugkeys.rs): inert unless RAC_DEBUG_KEYS=1; their writes happen here, between two fields.
 					debugkeys::pre_field(&mut m, field, !front && !booting);
@@ -3304,6 +3307,8 @@ impl Retail {
 						}
 						// The title's Options -> Graphics row (pcext.rs `hook_front`).
 						pcext::hook_front(&mut m);
+						// And the main menu's Quit Game row (titlequit.rs).
+						titlequit::hook_front(&mut m.cpu.mem);
 						(pooled, transit, front_n, front_ns) = (u32::MAX, true, 0, 0);
 						eprintln!("retail: front end running at field {field} (late GS pipe {late_gs})");
 					} else if front && !in_front {

@@ -507,7 +507,7 @@ fn canary(mem: &mut Mem, field: u32) {
 	static ARMED: AtomicBool = AtomicBool::new(false);
 	static BAD: Mutex<u32> = Mutex::new(0);
 	if !ARMED.swap(true, Ordering::Relaxed) {
-		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a) && !super::pcplug::RANGE.contains(a)) {
+		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a) && !super::pcplug::RANGE.contains(a) && !super::titlequit::RANGE.contains(a)) {
 			mem.wr8(a, 0xa5);
 		}
 		eprintln!("retail: canary armed {LO:#x}..{HI:#x} at field {field}");
