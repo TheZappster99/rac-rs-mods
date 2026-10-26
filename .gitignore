@@ -17,3 +17,8 @@
 /rac-rs/src/particles/orb_tables.rs
 # The install's mods folder (setup copies the bundled mods there, the game writes the built-in mods' manifests and active.txt)
 /mods/
+# The RAC-RS Launcher's own files when it lives in the install folder, and Python caches
+/library.json
+/profiles/
+/rac-rs-launcher-*.exe
+__pycache__/
