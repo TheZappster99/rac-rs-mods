@@ -1,15 +1,15 @@
 //! [PC] Built-in mods: optional PC features compiled into the game that the player switches On / Off with the game's mods, in the
-//! launcher's Mods page or on the title screen (Options -> Mods, retail/pcmods.rs). No retail counterpart.
+//! launcher's Mods page (the in-game Mods pages, retail/pcmods.rs, are off: retail/pcext.rs `MODS_PAGE`). No retail counterpart.
 //!
 //! A built-in mod is a Rust type that implements `Plugin` and is listed in `PLUGINS`. It is compiled into the game like the rest of
 //! the PC code: it may live anywhere in the crate (the renderer, the retail driver, ...) and only asks this module whether it is on.
 //!
 //! The mods folder (omni/load.rs `mods_dir`) is where every mod lives, and these too: at the first question the game writes each
-//! built-in mod's `<id>/omni-mod.json` there (rewritten only when it differs), so the launcher and the title's Mods page list it with
+//! built-in mod's `<id>/omni-mod.json` there (rewritten only when it differs), so the launcher lists it with
 //! its settings like any script mod. The manifest says `"type": "script"` (the launcher accepts only script and native mods) with no
 //! scripts and `"builtin": true`; omni/load.rs never hands a built-in id to OmniLoader (`is_builtin`). So:
 //! - On / Off is the mod's line in `mods/active.txt` under the "Load mods" master tick (omni/plugins.rs `active_ids`: no line = off),
-//!   written by the launcher (from the profile, at Play) and by the title's Mods page.
+//!   written by the launcher (from the profile, at Play).
 //! - Settings are the mod's entry in `mods/settings.json`, by choice value (`value_name`); a missing or unknown value is the default.
 //! - Both are read once, when the game starts (the mods' rule: "Mods change at the next start"). `pre_field` runs for the mods that
 //!   were on at the start.

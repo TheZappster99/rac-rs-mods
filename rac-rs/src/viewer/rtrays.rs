@@ -1,4 +1,4 @@
-//! [PC] Ray-traced sun rays (the built-in mod Ray-traced sun rays, plugins.rs: Mods in the launcher or on the title, read at start-up; RAC_RT_RAYS=1 forces it on).
+//! [PC] Ray-traced sun rays (the built-in mod Ray-traced sun rays, plugins.rs: Mods in the launcher, read at start-up; RAC_RT_RAYS=1 forces it on).
 //! No retail counterpart. They take the place of the screen-space Sun rays (post.rs `fs_rmask` / `fs_rays`) while the level's
 //! ray-tracing structure (rtshadow.rs) is built, with Lighting Enhanced, Dynamic shadows and Sun rays on; otherwise the
 //! screen-space ones draw as before.

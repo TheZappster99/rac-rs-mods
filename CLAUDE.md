@@ -76,7 +76,7 @@ Known problem: the debug test exe is ~2.18 GB and Windows refuses to run it (> 2
 ## Built-in mods (plugins)
 
 Optional PC features compiled into the game (no DLLs, no scripts) that the player switches On / Off like any other mod: in the
-RAC-RS Launcher's Mods page or on the title screen under Options -> Mods (`retail/pcmods.rs`, upstream's page). A built-in mod is a
+RAC-RS Launcher's Mods page only (upstream's in-game Mods pages, `retail/pcmods.rs`, are switched off by `pcext::MODS_PAGE`). A built-in mod is a
 Rust type implementing `plugins::Plugin` (`rac-rs/src/plugins.rs`) plus one entry in the `PLUGINS` list there. Its code may live
 anywhere (renderer, retail driver); it only asks `crate::plugins` whether it is on. New optional features should be built-in mods
 rather than new env vars or new Options rows. Do not add menu pages of our own: upstream's Mods page owns `BASE+0xC000..0xD800` and
@@ -91,7 +91,7 @@ text ids `0x7fc0..0x8000` (our `titlequit.rs` Quit Game row uses `BASE+0xE000..0
   start-up (`plugins::on_at_start("id")`, `value_at_start("id", "setting")` -> index into `values`): mods change at the next start.
   `pre_field(&mut Machine)` runs before each level field for the mods that are on (after modcam/strafe/aim).
 - **Settings shape**: `fn settings() -> &'static [Setting]` (`id`, `name`, 2..=4 `values`, `default` index), written into the
-  manifest as `choice` settings, so the launcher and the title's Mods page show them.
+  manifest as `choice` settings, so the launcher shows them.
 - **Rules** (checked by `plugin_ids_and_names_fit_the_file_and_the_menu`): ids are the loader's mod ids (lower case letters and
   digits joined by single hyphens, e.g. `rt-shadows`); setting ids `[a-z0-9_]`; names and values are ASCII letters, digits,
   spaces and `-` only (the game's font), names <= 24 chars, values <= 16. Every mod has a `description()` for the launcher.

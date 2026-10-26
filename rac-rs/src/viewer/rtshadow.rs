@@ -36,7 +36,7 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// Set with `ON` when the Ray-traced shadows mod is the one on: the receivers trace (`shadows`).
 static SHADOWS: AtomicBool = AtomicBool::new(false);
 
-/// The Ray-traced shadows built-in mod (plugins.rs: Mods in the launcher or on the title, read at start-up; RAC_RT_SHADOWS=1 still forces it on).
+/// The Ray-traced shadows built-in mod (plugins.rs: Mods in the launcher, read at start-up; RAC_RT_SHADOWS=1 still forces it on).
 fn wanted_shadows() -> bool {
 	crate::plugins::on_at_start("rt-shadows")
 }

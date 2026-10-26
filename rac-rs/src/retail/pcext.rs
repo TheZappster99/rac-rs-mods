@@ -43,6 +43,8 @@
 //!   Custom). A preset never touches camera, controls, language, display mode, culling or the renderer; High is today's default picture.
 //! - Mods page (`pcmods.rs`): Pause -> Options -> Mods = the 10th row, only while a mod is on in `active.txt` (`pcmods::load_store`);
 //!   packs On/Off + running script mods' settings. Title -> Options -> Mods (`build_title`): mod On/Off + settings + packs.
+//!   [This fork] Off (`MODS_PAGE`): mods, packs and their settings are switched only in the RAC-RS Launcher, so neither row is added
+//!   and pcmods.rs never builds its pages (its field / sync / text hooks then do nothing).
 //! - Title screen: Options -> Graphics (`title_options`, a hand on the front end's Options list set-up) shows the same rows on
 //!   a copy of the Video Options page; `front_field` applies and remembers them, the mirror draws them (viewer/front_mirror.rs,
 //!   frontend.rs `Page::Graphics`). The Options rows themselves are retail's of the disc's region (USA: no Video row).
@@ -174,6 +176,8 @@ const FRONT_VIDEO_HDR: u32 = 0x4f3a;
 const FRONT_VIDEO_ROW: u32 = 0x4f3b;
 /// The Graphics row of the Options list: before Quit Game (the 7th retail row).
 const GRAPHICS_ROW: usize = 6;
+/// [This fork] The Mods pages (pcmods.rs) in the title and pause Options lists: off, the launcher manages mods (module doc).
+pub(super) const MODS_PAGE: bool = false;
 /// The retail Options rows (text ids, list item records at +0x34): HelpDesk, Save, Load, Sound, Camera, Subtitles, Quit Game.
 const OPTIONS_ROWS: [u32; 7] = [0x4f1e, 0x4f1f, 0x4f20, 0x4f22, 0x4f23, 0x4f24, 0x4f26];
 /// The Camera Options header text (its header item's +0x34).
@@ -795,7 +799,7 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	}
 	// Before Quit Game: Graphics (the planet picture), Controls (the Camera row's picture) and, only when a mod is switched on
 	// (`load_store`, once per planet load), Mods (Graphics' planet again): `n` rows, each with its record, description and picture.
-	let store = super::pcmods::load_store();
+	let store = if MODS_PAGE { super::pcmods::load_store() } else { None };
 	let n = 2 + store.is_some() as usize;
 	pics.splice(GRAPHICS_ROW..GRAPHICS_ROW, [planet, pics[4], planet].into_iter().take(n));
 	let (recs, descs) = (mem.rd32(list + 0x34), mem.rd32(text + 0x34));
@@ -957,7 +961,7 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	setup(mem, s);
 	recs.push([ID_GRAPHICS | 3 << 16, TGPAGE, 0]);
 	let seq = mem.rd32(sound + 0xc);
-	let trecs = super::pcmods::title_extend(mem, [video, hdr, val], seq, &mut recs, TRECS);
+	let trecs = if MODS_PAGE { super::pcmods::title_extend(mem, [video, hdr, val], seq, &mut recs, TRECS) } else { TRECS };
 	let same = recs.iter().enumerate().all(|(i, r)| mem.rd32(trecs + 12 * i as u32) == r[0] && mem.rd32(trecs + 12 * i as u32 + 4) == r[1]) && mem.rd32(trecs + 12 * recs.len() as u32) == 0;
 	if !same {
 		for (i, r) in recs.iter().chain([&[0u32; 3]]).enumerate() {

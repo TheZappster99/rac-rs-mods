@@ -381,6 +381,7 @@ fn eudora_options_list(dir: &str, root: &std::path::Path) -> ee_oracle::Machine 
 /// The Options list shows the Mods row only when at least one installed mod is switched on in `active.txt`: without any mod on
 /// (no mods folder content, or mods installed and all off) the list is the retail 7 rows + Graphics + Controls = 9, one mod on gives
 /// 10 rows with Mods before Quit Game. Switching the last mod off in the game keeps the row until the next level load.
+/// [This fork] With `MODS_PAGE` off there is never a Mods row (the launcher manages mods).
 #[test]
 fn the_options_list_shows_mods_only_while_a_mod_is_on() {
 	let _t = turn(); // sync sets the camera statics the other tests of this file read
@@ -393,12 +394,12 @@ fn the_options_list_shows_mods_only_while_a_mod_is_on() {
 		eprintln!("{label}: the 9 retail rows");
 	}
 	let mut m = eudora_options_list(&dir, &on);
-	options_records_hold_the_new_rows(&mut m.cpu.mem, true);
+	options_records_hold_the_new_rows(&mut m.cpu.mem, MODS_PAGE);
 	// The last mod goes off in the game (active.txt rewritten): the patched list is left alone (idempotent), so the row stays.
 	std::fs::write(on.join("active.txt"), "# nothing on\n").unwrap();
 	let mut s = St { opts: PcOptions::default(), path: None, last: None, glast: None, lang_seen: None, warned: false };
 	sync(&mut m.cpu.mem, 4, false, &mut s);
-	options_records_hold_the_new_rows(&mut m.cpu.mem, true);
+	options_records_hold_the_new_rows(&mut m.cpu.mem, MODS_PAGE);
 	// The next level load rebuilds the list from the folder as it is now: no row.
 	let mut m = eudora_options_list(&dir, &on);
 	options_records_hold_the_new_rows(&mut m.cpu.mem, false);
