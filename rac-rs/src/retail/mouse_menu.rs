@@ -167,8 +167,9 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 	if id == 5 && slot == 1 {
 		return Kind::Ring { cursor: rd(it + 0x50) & 7 };
 	}
-	// The title's Graphics page (pcext.rs `title_options`): the front end's value item, 5-word rows, row cursor at +0x38.
-	if it == super::pcext::TGVAL {
+	// The title's Graphics and Plugins pages (pcext.rs `title_options`, pcplug.rs `build_title`): the front end's value item, 5-word
+	// rows, row cursor at +0x38.
+	if it == super::pcext::TGVAL || it == super::pcplug::TVAL {
 		let n = (0..16).take_while(|k| rd(rd(it + 0x34) + 20 * k) != 0).count() as u32;
 		return Kind::Value { n: n.max(1), cursor: rd(it + 0x38) };
 	}

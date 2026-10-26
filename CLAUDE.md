@@ -96,7 +96,10 @@ rather than new env vars or new Options rows.
   itself on first use, so the renderer may ask before the retail driver starts.
 - **Menu internals** (`retail/pcplug.rs`): the page is a copy of the retail Camera Options page patched into reserved PS2 RAM like
   the Graphics / Controls pages (`pcext.rs` `patch_graphics` adds the Options row after Controls). Reserved RAM `BASE+0xC000..
-  0xD000`, text ids `0x7fb0..0x7fe0`. Max 7 rows per page, 4 values per row. Pause menu only (not the title screen).
+  0xE000`, text ids `0x7fb0..0x8000`. Max 7 rows per page, 4 values per row. The title screen has it too (Options -> Plugins
+  after Graphics, `pcplug::build_title`): one flat list of up to 13 rows (each plugin, then its settings as "- Name"), drawn by the
+  native mirror (`frontend.rs` `Page::Plugins` via `pcplug::title_rows`). The title's value item only flips a byte, so a setting
+  row steps to its next value on any change. `pcplug::sync` reads only the title page on the title and only the pause page in a level.
 
 ## Dev env vars
 

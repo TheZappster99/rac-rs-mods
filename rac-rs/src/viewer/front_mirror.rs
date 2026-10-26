@@ -28,6 +28,10 @@ fn page_of(m: Option<&MenuSnap>) -> Option<frontend::Page> {
 	if m.page == crate::retail::pcext::TGPAGE {
 		return Some(Graphics);
 	}
+	// And the PC Plugins page (retail/pcplug.rs `build_title`).
+	if m.page == crate::retail::pcplug::TPAGE {
+		return Some(Plugins);
+	}
 	Some(match crate::retail::disc::unva(m.page) {
 		P_ROOT => Root,
 		P_NEW => NewGame,
@@ -229,6 +233,9 @@ impl App {
 		// The PC options' texts (the Graphics row and page) join the language's strings.
 		if fe.text.get(crate::retail::pcext::ID_GRAPHICS).is_empty() {
 			for (id, s) in crate::retail::pcext::texts(lang) {
+				fe.text.insert(id, s);
+			}
+			for (id, s) in crate::retail::pcplug::texts(lang) {
 				fe.text.insert(id, s);
 			}
 		}

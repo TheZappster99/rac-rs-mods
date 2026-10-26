@@ -125,7 +125,9 @@ const GTAB: u32 = BASE + 0xaa0;
 /// The title's Graphics page (`title_options`): the Options list records (up to 4 + the zero record, 12 bytes each), the page
 /// (a copy of Video Options; 0x100 bytes, zero after its 0x88), its header item, its value item and that item's rows (13 + the
 /// zero record, 20 bytes each: the front end's value item reads 5-word rows), ending at BASE + 0xef8.
-const TRECS: u32 = BASE + 0xc00;
+/// The title's Options list records live in the Plugins block now (pcplug.rs `TRECS`: up to 5 + the zero record would reach TGPAGE);
+/// BASE + 0xc00..0xc40 is unused.
+const TRECS: u32 = super::pcplug::TRECS;
 pub const TGPAGE: u32 = BASE + 0xc40;
 const TGHDR: u32 = BASE + 0xd40;
 pub const TGVAL: u32 = BASE + 0xda0;
@@ -709,7 +711,7 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		}
 	}
 	// The Plugins page (pcplug.rs): a switched plugin or a changed setting is remembered (`plugins=`, `plugin.<id>=`).
-	if super::pcplug::sync(mem) {
+	if super::pcplug::sync(mem, level == u32::MAX) {
 		for (key, value) in crate::plugins::file_values() {
 			s.opts.extra_set(&key, value);
 		}
@@ -1011,6 +1013,8 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	let (Some(hdr), Some(val)) = (hdr, val) else { return None };
 	setup(mem, s);
 	recs.push([ID_GRAPHICS | 3 << 16, TGPAGE, 0]);
+	// Plugins (pcplug.rs) after Graphics, so restart plugins can be switched before a save is loaded.
+	recs.push([super::pcplug::ID_PLUGINS | 3 << 16, super::pcplug::TPAGE, 0]);
 	let same = recs.iter().enumerate().all(|(i, r)| mem.rd32(TRECS + 12 * i as u32) == r[0] && mem.rd32(TRECS + 12 * i as u32 + 4) == r[1]) && mem.rd32(TRECS + 12 * recs.len() as u32) == 0;
 	if !same {
 		for (i, r) in recs.iter().chain([&[0u32; 3]]).enumerate() {
@@ -1045,6 +1049,8 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	for (i, w) in tab.iter().enumerate() {
 		mem.wr32(TGTAB + 4 * i as u32, *w);
 	}
+	// The Plugins page, from the same Video Options items.
+	super::pcplug::build_title(mem, video, hdr, val, seq);
 	mem.wr32(item + 0x34, TRECS);
 	Some(if is_pal { 9 } else { 8 })
 }
@@ -2274,7 +2280,7 @@ mod tests {
 			m
 		};
 		let code_at = |m: &mut Mem| TITLE_CODE.iter().enumerate().all(|(k, &(v, mask))| m.rd32(pc + 4 * k as u32) & mask == v);
-		let ids = |m: &mut Mem| -> Vec<u32> { (0..5).map(|i| m.rd32(TRECS + 12 * i)).collect() };
+		let ids = |m: &mut Mem| -> Vec<u32> { (0..6).map(|i| m.rd32(TRECS + 12 * i)).collect() };
 		let dirp = scratch("title");
 		let mut s = St { opts: PcOptions::default(), path: Some(dirp.join("pc_options.txt")), last: None, glast: None, lang_seen: None, warned: false };
 		let item = 0x1d47e8;
@@ -2283,7 +2289,8 @@ mod tests {
 		assert!(code_at(&mut m));
 		assert_eq!(build_title(&mut m, pc, item, &mut s), Some(9));
 		assert_eq!((m.rd32(item + 0x34), m.rd32(BASE)), (TRECS, MAGIC));
-		assert_eq!(ids(&mut m), [0x34f2b, 0x34f21, 0x34f22, ID_GRAPHICS | 3 << 16, 0]);
+		assert_eq!(ids(&mut m), [0x34f2b, 0x34f21, 0x34f22, ID_GRAPHICS | 3 << 16, super::super::pcplug::ID_PLUGINS | 3 << 16, 0]);
+		assert_eq!(m.rd32(TRECS + 52), super::super::pcplug::TPAGE, "Plugins opens its title page");
 		assert_eq!((m.rd32(TRECS + 4), m.rd32(TRECS + 16), m.rd32(TRECS + 28), m.rd32(TRECS + 40)), (0x1d48c0, video, sound, TGPAGE));
 		// The page: Video's sequences with Sound's value panel, parent Options, id, current item and items ours.
 		let seqs: Vec<u32> = (0..6).map(|k| m.rd32(TGPAGE + 4 * k)).collect();
@@ -2308,7 +2315,7 @@ mod tests {
 		// USA (region word 0): Language, Sound, Graphics.
 		let mut m = fresh(false);
 		assert_eq!(build_title(&mut m, pc, item, &mut s), Some(8));
-		assert_eq!(ids(&mut m), [0x34f2b, 0x34f22, ID_GRAPHICS | 3 << 16, 0, 0]);
+		assert_eq!(ids(&mut m), [0x34f2b, 0x34f22, ID_GRAPHICS | 3 << 16, super::super::pcplug::ID_PLUGINS | 3 << 16, 0, 0]);
 		assert_eq!(m.rd32(TGPAGE + 0xc), 0xd2);
 
 		// Not the retail Video page (header text), a fourth row, or a row that is not a page: retail's list stays.
