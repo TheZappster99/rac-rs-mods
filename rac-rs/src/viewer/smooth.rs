@@ -23,6 +23,11 @@ thread_local! {
 	pub(super) static PROP_XF: std::cell::RefCell<Vec<Option<([f32; 16], f32)>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+	/// Ragdoll Ratchet diagnosis: the next `props` call says how far it moved the carried props.
+	static CARRY_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The interpolated placement of prop `pi` for this frame, if any.
 pub(super) fn prop_xf(pi: usize) -> Option<([f32; 16], f32)> {
 	PROP_XF.with(|t| t.borrow().get(pi).copied().flatten())
@@ -270,6 +275,8 @@ pub(super) struct Smooth {
 	/// The camera of the scene's true tick (pos, yaw, pitch, tan_half), put back once the world draw lists are built
 	/// (handler.rs) so the drawn (offset) scene camera never reaches the sound or the next game ticks.
 	pub tick_cam: Option<(V3, f32, f32, f32)>,
+	/// Ragdoll Ratchet is limp (`set_limp`).
+	limp: bool,
 }
 
 impl Smooth {
@@ -374,11 +381,42 @@ impl Smooth {
 	pub(super) fn attach(&mut self, props: &[Prop], parts: &[usize], at: Option<(V3, f32)>, tilt: [f32; 2]) {
 		self.attached.clear();
 		self.fix_frames = None;
-		let (Some(at), Some(now)) = (at, self.hero_now) else { return };
+		// Ragdoll Ratchet diagnosis (RAC_RAGDOLL_LOG): one line per `where` line, saying whether Clank and the held parts were carried.
+		let say = super::ragdoll::LIMP_LOG.swap(false, std::sync::atomic::Ordering::Relaxed);
+		let held = if self.limp { crate::game::held::rig_classes() } else { Vec::new() };
+		let (Some(at), Some(now)) = (at, self.hero_now) else {
+			if say {
+				eprintln!("ragdoll: attach skipped: at {} hero_now {}", at.is_some(), self.hero_now.is_some());
+			}
+			return;
+		};
 		let d = hero_frame(at.0, at.1, tilt);
 		let blended = self.active && self.drawn == Some((at.0, at.1, tilt));
 		if !blended && ((self.fix_now.is_none() && self.gun_now.is_none()) || d != now) {
+			if say {
+				eprintln!("ragdoll: attach skipped: smoothing {} blended {blended} pose fix {} drawn = game {}", self.active, self.fix_now.is_some(), d == now);
+			}
 			return;
+		}
+		if say {
+			let mut near_n = 0;
+			let mut cands = Vec::new();
+			for (pi, p) in props.iter().enumerate() {
+				if p.shown && (ATTACHED.contains(&p.class_id) || parts.contains(&pi) || held.contains(&p.class_id)) {
+					let near = (p.pos[0] - now[12]).hypot(p.pos[1] - now[13]) < ATTACH_REACH && (p.pos[2] - now[14]).abs() < 3.0;
+					near_n += near as u32;
+					cands.push(format!("{}{}", p.class_id, if near { "" } else { "(far)" }));
+				}
+			}
+			eprintln!("ragdoll: attach blended {blended} pose fix {} parts {} near {near_n}: [{}]", self.fix_now.is_some(), parts.len(), cands.join(" "));
+			// Every shown prop near him, whatever its class (to find the held weapon's), with how far it sits from his feet.
+			let around: Vec<String> = props
+				.iter()
+				.filter(|p| p.shown && (p.pos[0] - now[12]).hypot(p.pos[1] - now[13]) < ATTACH_REACH && (p.pos[2] - now[14]).abs() < 3.0)
+				.map(|p| format!("{}@{:.2}", p.class_id, ((p.pos[0] - now[12]).powi(2) + (p.pos[1] - now[13]).powi(2) + (p.pos[2] - now[14]).powi(2)).sqrt()))
+				.collect();
+			eprintln!("ragdoll: around [{}]", around.join(" "));
+			CARRY_LOG.with(|c| c.set(true));
 		}
 		let was = self.hero_was.unwrap_or(now);
 		let blend = blended && self.hero_before.is_some();
@@ -389,7 +427,7 @@ impl Smooth {
 		let near_hero = |h: &[f32; 16], p: V3| (p[0] - h[12]).hypot(p[1] - h[13]) < ATTACH_REACH && (p[2] - h[14]).abs() < 3.0;
 		self.attached.resize(props.len(), None);
 		for (pi, p) in props.iter().enumerate() {
-			if !p.shown || !(ATTACHED.contains(&p.class_id) || parts.contains(&pi)) || !near_hero(&now, p.pos) {
+			if !p.shown || !(ATTACHED.contains(&p.class_id) || parts.contains(&pi) || held.contains(&p.class_id)) || !near_hero(&now, p.pos) {
 				continue;
 			}
 			let rel_now = gun(&self.gun_now, p.class_id, fixed(&self.fix_now, p.class_id, rel_place(&now, &place(p.pos, p.rot))));
@@ -403,6 +441,12 @@ impl Smooth {
 	}
 
 	/// The pose fix of the newest tick (frame_hero.rs, once per computed hero pose; None while the strafe draw is off).
+	/// Ragdoll Ratchet: he is limp in the newest computed pose (`attach` then also carries the held weapon onto the limp body; retail
+	/// draws it as a moby of its own, and it stayed in the game's Ratchet's hand).
+	pub(super) fn set_limp(&mut self, limp: bool) {
+		self.limp = limp;
+	}
+
 	pub(super) fn set_pose_fix(&mut self, fix: Option<crate::retail::strafe::PoseFix>) {
 		self.fix_was = std::mem::replace(&mut self.fix_now, fix);
 		self.gun_was = self.gun_now.take();
@@ -499,9 +543,13 @@ impl Smooth {
 				}
 			}
 		}
+		let say = CARRY_LOG.with(|c| c.replace(false));
 		for (pi, a) in self.attached.iter().enumerate() {
 			if a.is_some() && pi < xf.len() {
 				xf[pi] = *a;
+				if let (true, Some((m, _)), Some(p)) = (say, a, props.get(pi)) {
+					eprintln!("ragdoll: carried {} moved {:.2} from where the game put it", p.class_id, ((m[12] - p.pos[0]).powi(2) + (m[13] - p.pos[1]).powi(2) + (m[14] - p.pos[2]).powi(2)).sqrt());
+				}
 			}
 		}
 		PROP_XF.with(|c| *c.borrow_mut() = xf);

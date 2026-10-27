@@ -312,6 +312,8 @@ impl App {
 				let warp_cam = travel::mirror_warp::camera(r).is_some();
 				let up = if warp_cam { [0.0, 0.0, 1.0] } else { r.camera_up(if self.smooth.active { self.smooth.alpha } else { 1.0 }) };
 				(self.cam.pos, self.cam.yaw, self.cam.pitch, self.cam.tan_half, self.cam.up) = (c.0, c.1, c.2, c.3, up);
+				// Ragdoll Ratchet: the view follows the limp body (viewer/ragdoll.rs `cam_place`; unchanged when he is not limp).
+				self.cam.pos = self.ragdoll.cam_place(self.cam.pos, if self.smooth.active { self.smooth.alpha } else { 1.0 });
 				self.glint_cam = Some(c);
 				self.glint_up = if warp_cam { [0.0, 0.0, 1.0] } else { r.camera_up(1.0) };
 			}

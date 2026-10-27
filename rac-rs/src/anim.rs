@@ -1690,6 +1690,17 @@ pub fn vu0_quantise(p: [f32; 3], unit: f32) -> [f32; 3] {
 /// Weighted skinning of the class's LOD 0 vertices; returns (positions, normals) in the space of
 /// `class.mesh.positions`. Normals are transformed by the rotation part and renormalised.
 pub fn skin(class: &MobyClass, mats: &[[f32; 12]]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+	skin_q(class, mats, vu0_quantise)
+}
+
+/// [PC] Ragdoll Ratchet: `skin` truncated like VU0 but not wrapped to 16 bits. The 16 bits hold about 4.5 units around the
+/// model origin (the game's Ratchet's feet); a thrown limp body goes further, and the vertices past it wrapped to the far
+/// side, drawn as a long line through him.
+pub fn skin_wide(class: &MobyClass, mats: &[[f32; 12]]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+	skin_q(class, mats, |p, unit| p.map(|x| (x / unit).trunc() * unit))
+}
+
+fn skin_q(class: &MobyClass, mats: &[[f32; 12]], quantise: impl Fn([f32; 3], f32) -> [f32; 3]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
 	let mut positions = Vec::with_capacity(class.skin.len());
 	let mut normals = Vec::with_capacity(class.skin.len());
 	for ((p, n), s) in class.mesh.positions.iter().zip(&class.normals).zip(&class.skin) {
@@ -1706,7 +1717,7 @@ pub fn skin(class: &MobyClass, mats: &[[f32; 12]]) -> (Vec<[f32; 3]>, Vec<[f32; 
 			}
 		}
 		let len = (na[0] * na[0] + na[1] * na[1] + na[2] * na[2]).sqrt();
-		positions.push(vu0_quantise(pa, class.scale / 1024.0));
+		positions.push(quantise(pa, class.scale / 1024.0));
 		normals.push(if len > 0.0 { na.map(|x| x / len) } else { *n });
 	}
 	(positions, normals)

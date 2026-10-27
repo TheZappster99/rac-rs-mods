@@ -1,6 +1,7 @@
 //! [PC] Ragdoll Ratchet (RAGDOLL_PLAN.md), the worker half: the built-in mod `ragdoll-ratchet` (plugins.rs) and its measuring tools.
 //!
-//! The mod: a big fall that no Heli-Pack, Thruster-Pack or wrench slam broke, or L3 in the air, makes Ratchet go limp. Each field
+//! The mod: a big fall that no Heli-Pack, Thruster-Pack or wrench slam broke, L3 in the air, or an enemy hit (setting `hits`)
+//! makes Ratchet go limp. Each field
 //! `pre_field` tracks the fall from RAM, runs the phases and, while he is limp, hands the game a pad with only Start and the
 //! camera stick (the game's Ratchet then lands and stands where he is). The phase reaches the renderer as `HeroParts.ragdoll`
 //! (`current`), where viewer/ragdoll.rs draws the limp body. Nothing else is written, and with the mod off nothing runs.
@@ -51,6 +52,16 @@ const LEDGE_GROUP: u32 = 3;
 /// Game modes that only pause the ragdoll (a menu, the map): everything else but gameplay (0) ends it.
 const MENU_MODES: [u32; 2] = [1, 3];
 const GETUP_S: f32 = 0.6;
+/// The hit reaction (an enemy hit; RAGDOLL_PLAN.md "Hero states").
+const HIT_STATE: u32 = 0x16;
+const LAVA_STATE: u32 = 0x3c;
+/// Fields after a hit over which retail's knock-back is measured (his move over them, per second) before it is handed to the body.
+const HIT_FIELDS: u32 = 4;
+/// After a hit, no new one for this many fields: the state change and the health drop of one hit can come a field apart.
+const HIT_COOL: u32 = 20;
+/// The game's Ratchet falling (plain fall, tumble): after a hit this is a knock-back off a ledge, and with the pad locked he
+/// fell into the pit every time (logs 2026-10-26). The ragdoll then gets up at once and the pad is his again, so he can steer.
+const EDGE_FALL_STATES: [u32; 2] = [0x6, 0x77];
 
 /// States that end a ragdoll at once: water, mud, the Swingshot, the ship / turret and the grind.
 fn cancel_state(s: u32) -> bool {
@@ -86,6 +97,12 @@ pub struct Cue {
 	/// A ragdoll started by a landing: his speed in the last field in the air (units/s, world). By the field the landing is seen,
 	/// retail has already stopped him, so the drawn pose alone starts the body at rest: no impact, no bounce.
 	pub impact: Option<[f32; 3]>,
+	/// The latest enemy hit's push: (one id per hit, retail's knock-back speed in units/s, world). The renderer adds it to the body
+	/// once per id. It comes `HIT_FIELDS` after the hit, since retail only starts throwing him then.
+	pub push: Option<(u32, [f32; 3])>,
+	/// The ragdoll started from a hit: the body starts at rest. The drawn pose jumps into retail's hit reaction that field, and
+	/// the body read that jump as a launch of 10-12 units/s up on top of the push (logs 2026-10-26: pelvis 4.5 above him).
+	pub from_hit: bool,
 	/// Counts the fields the worker ran the mod for (not the menus): the renderer steps the body once per new value. Its own field
 	/// count runs on in the pause menu, where this cue is not renewed, and the body went on falling and settling behind the menu.
 	pub tick: u32,
@@ -113,6 +130,17 @@ struct Mod {
 	/// The impact speed of the ragdoll running now (`Cue::impact`).
 	impact: Option<[f32; 3]>,
 	tick: u32,
+	/// The previous field's hero state and health (the hit signals).
+	last_state: u32,
+	last_health: i32,
+	/// A hit being measured: fields since it, his position at it.
+	hit: Option<(u32, [f32; 3])>,
+	hit_cool: u32,
+	push_id: u32,
+	push: Option<(u32, [f32; 3])>,
+	from_hit: bool,
+	/// The get-up after `EDGE_FALL_STATES`: the pad is not locked.
+	free: bool,
 	phase: Phase,
 	/// Fields in the phase.
 	t: u32,
@@ -151,6 +179,7 @@ pub fn pre_field(m: &mut Machine) {
 	let getup = (GETUP_S / dt).round() as u32;
 	let flop = setting("flop").min(2);
 	let bounce = setting("bounce").min(2);
+	let hits = setting("hits") == 1;
 
 	let mut g = MOD.lock().unwrap();
 	let s = g.get_or_insert_with(Mod::default);
@@ -170,6 +199,7 @@ pub fn pre_field(m: &mut Machine) {
 	let vel = moved.filter(|_| !teleport).map_or([0.0; 3], |d| d.map(|v| v / dt));
 	s.last_pos = Some(pos);
 	let old = s.phase;
+	let mut restart = false;
 
 	if MENU_MODES.contains(&mode) && s.phase != Phase::Off {
 		// A menu: hold everything as it is (the menu needs its buttons, so no lock).
@@ -177,9 +207,37 @@ pub fn pre_field(m: &mut Machine) {
 		return;
 	}
 	s.tick = s.tick.wrapping_add(1);
+	// An enemy hit: the hit reaction starting, or health going down anywhere but in lava (the hit reaction can show a field late).
+	let hit = hits
+		&& s.hit_cool == 0
+		&& ((state == HIT_STATE && s.last_state != HIT_STATE) || (health < s.last_health && state != LAVA_STATE));
+	s.hit_cool = s.hit_cool.saturating_sub(1);
+	s.last_state = state;
+	s.last_health = health;
 	if mode != 0 || form != 0 || health <= 0 || teleport || cancel_state(state) {
 		s.phase = Phase::Off;
 		s.air = None;
+		s.hit = None;
+	} else if hit {
+		// Knocked down: limp from this field (he lies down where retail throws him); a hit while limp starts the limp time again.
+		// The push follows once retail's knock-back can be measured.
+		s.hit = Some((0, pos));
+		s.hit_cool = HIT_COOL;
+		match s.phase {
+			Phase::Off => {
+				s.phase = if airborne { Phase::Fall } else { Phase::Ground };
+				s.id = s.id.wrapping_add(1);
+				s.air = None;
+				s.impact = None;
+				s.from_hit = true;
+			}
+			Phase::Ground => restart = true,
+			Phase::GetUp => s.phase = Phase::Ground,
+			Phase::Fall => {}
+		}
+		if log_on() {
+			eprintln!("ragdoll: hit (state {state:#x}, health {health}, airborne {}) in {:?}", airborne as u8, old);
+		}
 	} else {
 		match s.phase {
 			Phase::Off => {
@@ -210,7 +268,12 @@ pub fn pre_field(m: &mut Machine) {
 				if s.phase != Phase::Off {
 					s.id = s.id.wrapping_add(1);
 					s.air = None;
+					s.from_hit = false;
 				}
+			}
+			Phase::Fall | Phase::Ground if s.from_hit && EDGE_FALL_STATES.contains(&state) => {
+				s.phase = Phase::GetUp;
+				s.free = true;
 			}
 			Phase::Fall => {
 				if !airborne {
@@ -232,6 +295,25 @@ pub fn pre_field(m: &mut Machine) {
 			}
 		}
 	}
+	if let Some((n, p0)) = s.hit.as_mut() {
+		*n += 1;
+		if *n >= HIT_FIELDS {
+			let v = [0, 1, 2].map(|k| (pos[k] - p0[k]) / (*n as f32 * dt));
+			s.push_id = s.push_id.wrapping_add(1);
+			s.push = Some((s.push_id, v));
+			s.hit = None;
+			if log_on() {
+				eprintln!("ragdoll: hit push {:.2} {:.2} {:.2}", v[0], v[1], v[2]);
+			}
+		}
+	}
+	if s.phase == Phase::Off {
+		s.push = None;
+		s.free = false;
+	}
+	if restart {
+		s.t = 0;
+	}
 	if s.phase != old {
 		s.t = 0;
 		if log_on() {
@@ -239,12 +321,12 @@ pub fn pre_field(m: &mut Machine) {
 		}
 	}
 	s.t += 1;
-	if s.phase != Phase::Off {
+	if s.phase != Phase::Off && !s.free {
 		// Only Start (pause) and the camera stick reach the game while he is limp.
 		m.set_pad(s.buttons & PAD_START, [s.sticks[0], s.sticks[1], 0x80, 0x80]);
 	}
 	let blend = if s.phase == Phase::GetUp { (s.t as f32 / getup.max(1) as f32).min(1.0) } else { 0.0 };
-	s.cue = Cue { id: s.id, phase: s.phase, blend, frozen: false, flop, bounce, impact: s.impact, tick: s.tick };
+	s.cue = Cue { id: s.id, phase: s.phase, blend, frozen: false, flop, bounce, impact: s.impact, push: s.push, from_hit: s.from_hit, tick: s.tick };
 }
 
 // ---- the measuring tools ----------------------------------------------------------------------------------------------------

@@ -25,7 +25,50 @@ Status (2026-10-26, end of the first session): phases 0-4 done and tuned. The pl
 **Open / next:**
 - **Commit** the work (the files under "Files", plus `physics.rs` `ids_in_box` / `nearest_among` / `ground_among` and
   `strafe.rs` `pose_fix_between`). `Cargo.lock` shows a large diff from the builds: check it before committing it.
-- **Phase 6, enemy hits knock him down** (the player's request): see "Phases".
+- **Phase 6, enemy hits knock him down**: built 2026-10-26, **not tested in game yet**. Setting `hits` (Enemy hits, Off / On,
+  default On). The worker counts a hit when the state turns 0x16 or health drops outside lava (`HIT_COOL` 20 fields between
+  hits). He goes limp that field (Ground, or Fall in the air), and a hit while limp restarts the limp time (GetUp goes back to
+  Ground). `HIT_FIELDS` (4) later, `Cue::push` carries retail's knock-back speed (his move over those fields). The renderer adds
+  it once per push id: x `hitpush` (2.5) plus `hitlift` (5.0 up), capped at `HIT_MAX` (22), the same speed on every part plus a
+  whole-body spin (`HIT_SPIN`) so he topples. (A first version gave the top more speed than the legs: on big launches a limb
+  stretched out and snapped back. `RAC_RAGDOLL_LOG` now writes a `stretch` line for any joint gap over 0.1.)
+  When retail barely moved him, it pushes backwards from where he faces (`HIT_BACK` 4). Log lines: `ragdoll: hit`, `hit push`,
+  `body hit push`. Tune live with `hitpush=` / `hitlift=` / `hitleash=` in `RAC_RAGDOLL_TUNE`.
+  First test: the push felt right, but the body stopped dead in the air "like an invisible barrier" at the 1-unit tether. After
+  a hit, the leash is now `hitleash` (6.0; 3.0 at first, the player asked for more) with no pull back inside it (`thrown`), and the get-up blend brings him back. A
+  resting body now wakes only when the game's Ratchet moves (`rest_at`), so a thrown body can rest away from him.
+- **Hit start at rest** (`Cue::from_hit`): the body used to take the drawn pose's jump into the hit reaction as speed
+  (10-12 units/s up, `body start ... moving`), on top of the push: the pelvis flew 4.5 above him, back into the camera, and a
+  tail or ear crossed the screen. A hit ragdoll now starts still and only the push throws it (raised from 1.5 / 2.5 to keep the throw).
+- **Streak after hits** (fixed and tested 2026-10-27, see the end of this item): `hide` puts a hidden part (gun, wrench, ghosts) at the model origin, the game's
+  feet; the tick blend drew a part hidden one tick and shown the next as a streak from there to the limp body. While limp,
+  `frame_hero.rs` moves the hidden vertices to the body's pelvis. (Not a joint stretch: no `stretch` lines in the log.)
+  Player, testing that build (2026-10-27): still "a line", "one specific part stuck", "tied to his feet when I get launched".
+  Second cause: `pose` never moved the root (joint 0) or other parentless joints, which sit at the game's feet, so vertices
+  weighted to them stayed there. They now ride the pelvis rigidly (blending back over the get-up). Built, untested.
+  Player: the line got bigger, "attached to his torso and below", on hitting the ground. **Real cause** (found with the
+  `stray` log line in `frame_hero.rs`): `anim::skin` keeps each vertex as retail's 16 bits (`vu0_quantise`), about +-4.53 units
+  around the model origin (the game's feet). A body thrown 4.4-5 units away put legs / tail / hands past it and they wrapped to
+  the far side (x -4.65 with the pelvis at +4.42). While limp the hero now uses `anim::skin_wide` (same truncation, no wrap).
+  **Fixed, tested 2026-10-27**: the player confirmed the line is gone; 6 hit throws up to 5.98 units away, no `stray` or
+  `stretch` lines. (The `stray` check stays as a log-only diagnosis.)
+- **Ledges and drops** (untested): with the 6 unit leash a thrown body went over a ledge and fell out of the world (pelvis z
+  -102, camera following it down). While the game's Ratchet stands, no floor under the pelvis within `EDGE_DEPTH` (2) of his feet
+  stops the body's outward motion and draws it back (`EDGE_BACK`); `DROP_MAX` (3) below his feet lifts it back. The camera
+  follows at most `CAM_DZ` (1.5) up or down.
+- **Held weapon while limp** (untested): retail draws it as a moby of its own and `Smooth::attach` did not carry it (`parts 0`):
+  it stayed in the game's Ratchet's hand. While limp (`Smooth::set_limp`) the held classes (`game::held::rig_classes`) are carried too.
+- **Knocked into a pit** (untested): the falls the player saw were the game's Ratchet knocked off the ledge (state 0x6 then
+  tumble 0x77, z 48 -> 0, pit death) with the pad locked; the body itself stayed on the ledge. A hit ragdoll now gets up at once
+  with the pad free when the game's state turns 0x6 / 0x77 (`EDGE_FALL_STATES`, `free`).
+- **Clank still left behind** (open): `attach` lists him as carried (601 607 1204) yet the player sees him at the game's
+  Ratchet; the weapon is not in the list. Diagnosis: `around` (every shown prop near him, class@distance) and `carried`
+  (how far `props` moved each carried prop).
+- Diagnosis lines (`RAC_RAGDOLL_LOG`): `where` (body vs the game's Ratchet, camera offset) and `attach` (what was carried).
+- **Camera follow** (setting `camera`, Off / On, default On; built 2026-10-26, not tested yet): `frame_post.rs frame_camera` moves
+  retail's camera with `Ragdoll::cam_place`, kept `CAM_MIN` (2.0) off the body's pelvis: the body's pelvis minus the game's, eased 15% per field (`CAM_EASE`), half the height
+  (`CAM_Z`), faded out over the get-up, blended between fields like the hero. Drawing only, nothing written. No camera collision
+  on the offset: watch for the view clipping into walls after a throw.
 - Untested: the Thruster-Pack (0x10), pits and water while limp, moving platforms, cutscenes, the PAL disc, other planets.
 - The get-up is still a plain 0.6 s blend (phase 5: a retail clip would look better).
 - Settings are read at start-up only (built-in mods rule): change them in the launcher or `mods/settings.json`, then restart.

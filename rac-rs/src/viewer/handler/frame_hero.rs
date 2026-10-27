@@ -77,10 +77,12 @@ impl App {
 					None => rparts.and_then(|q| strafe_fix(&self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats)),
 				};
 				self.smooth.set_pose_fix(fix);
+				self.smooth.set_limp(ragdoll_logic.is_some());
 				// HELD-GLOVE: a glove in hand (FUN_0020d018) is posed from the hero's own live local joints, not its clock.
 				let hand_copy = crate::inventory::hand_pose_copy(game.inv.equipped);
 				let hero_local = if hand_copy { self.hero_rig.hero.local_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses) } else { Vec::new() };
-				let (mut ps, mut ns) = anim::skin(class, &mats);
+				// Ragdoll Ratchet: the limp body may lie further from his feet than retail's 16-bit vertices reach (`skin_wide`).
+				let (mut ps, mut ns) = if ragdoll_logic.is_some() { anim::skin_wide(class, &mats) } else { anim::skin(class, &mats) };
 				// HERO-16: the limb pulse squashes the hero's x and y axes; held items follow below.
 				let pulse = p.pulse_scale;
 				let hero_pt = [0.0, 0.0, crate::player::HERO_POINT_Z];
@@ -363,6 +365,51 @@ impl App {
 					ps.extend(gp.iter().map(|&v| local(v, 1.0)));
 					ns.extend(gn.iter().map(|&v| local(v, 0.0)));
 					ghost_ranges[2 + gi] = Some((base, ps.len(), alpha));
+				}
+				// Ragdoll Ratchet: a hidden part (`hide`) sits at the model origin, his feet where the game stands him. The tick blend
+				// draws a part that was hidden one tick and shown the next (a gun, the wrench, the flicker after a hit) moving from there,
+				// which is a short streak normally but one across the whole throw when the limp body lies away from him. While he is
+				// limp the hidden parts sit at the limp body's pelvis instead.
+				if ragdoll_logic.is_some() {
+					let pel = a.joint_world(&mats, 1);
+					let pel = [pel[3], pel[7], pel[11]];
+					for v in ps.iter_mut().filter(|v| **v == [0.0; 3]) {
+						*v = pel;
+					}
+					// Ragdoll Ratchet diagnosis (RAC_RAGDOLL_LOG): vertices far from every joint of the limp body are the "line" the
+					// player sees; say which joints they are skinned to (hero mesh) or which range they are in (held items, ghosts).
+					if crate::retail::ragdoll::log_on() {
+						static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+						let joints: Vec<[f32; 3]> = (0..mats.len()).map(|j| a.joint_world(&mats, j)).map(|m| [m[3], m[7], m[11]]).collect();
+						let near = |v: &[f32; 3]| joints.iter().map(|j| (v[0] - j[0]).powi(2) + (v[1] - j[1]).powi(2) + (v[2] - j[2]).powi(2)).fold(f32::MAX, f32::min).sqrt();
+						let stray: Vec<usize> = (0..ps.len()).filter(|&i| near(&ps[i]) > 0.6).collect();
+						if !stray.is_empty() && SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 10 == 0 {
+							let mut tied: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
+							for &i in stray.iter().filter(|&&i| i < hero_n) {
+								let s = &class.skin[i];
+								for k in 0..3 {
+									if s.weights[k] != 0.0 {
+										*tied.entry(s.joints[k] as u16).or_default() += 1;
+									}
+								}
+							}
+							let far = stray.iter().map(|&i| near(&ps[i])).fold(0.0f32, f32::max);
+							let v = ps[stray[0]];
+							eprintln!(
+								"ragdoll: stray {} vertices (hero mesh {}, max {far:.2} from a joint; first #{} at {:.2} {:.2} {:.2}, pelvis {:.2} {:.2} {:.2}) joints {:?}",
+								stray.len(),
+								stray.iter().filter(|&&i| i < hero_n).count(),
+								stray[0],
+								v[0],
+								v[1],
+								v[2],
+								pel[0],
+								pel[1],
+								pel[2],
+								tied
+							);
+						}
+					}
 				}
 				(ps, ns)
 			}) };

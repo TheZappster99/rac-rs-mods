@@ -60,6 +60,9 @@ const JOINTS: [(usize, usize, usize, f32, f32); 10] = [
 	(9, 10, 99, 65.0, 10.0),
 ];
 
+/// `RAC_RAGDOLL_LOG`: set with each `where` line, so the next `Smooth::attach` says what it carried onto the body.
+pub(super) static LIMP_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The hero model's joint count (the only skeleton this drives).
 const HERO_JOINTS: usize = 111;
 /// The pelvis never gets further than this (sideways) from the game's Ratchet.
@@ -86,11 +89,16 @@ struct Tune {
 	tether: f32,
 	/// Share of the speed into the ground a contact gives back per Bounciness (Off, Some, Lots).
 	bounce: [f32; 3],
+	/// An enemy hit's push: retail's knock-back speed x `hitpush`, plus `hitlift` units/s up so he tips over instead of sliding.
+	hitpush: f32,
+	hitlift: f32,
+	/// The pelvis's leash after a hit (units, instead of `TETHER_MAX`): the push throws the body further than retail throws him.
+	hitleash: f32,
 }
 
 /// Defaults. Second round (2026-10-26, "a bit spastic when hitting the ground"): more damping, a firmer drive and narrower
 /// Loose limits than the first (damp 0.4, adamp 1.5, drive 0.05 / 0.5, limits 0.6 / 1.0 / 1.6, 8 substeps).
-const TUNE: Tune = Tune { gravity: 24.0, substeps: 10, damp: 0.8, adamp: 4.0, friction: 0.3, drive: [0.02, 0.2], limits: [0.6, 0.85, 1.4], tether: 2.0, bounce: [0.0, 0.35, 0.6] };
+const TUNE: Tune = Tune { gravity: 24.0, substeps: 10, damp: 0.8, adamp: 4.0, friction: 0.3, drive: [0.02, 0.2], limits: [0.6, 0.85, 1.4], tether: 2.0, bounce: [0.0, 0.35, 0.6], hitpush: 2.5, hitlift: 5.0, hitleash: 6.0 };
 
 /// See `capsule_ii`.
 const INERTIA: f32 = 2.5;
@@ -116,6 +124,33 @@ const BODY_BOUNCE_MIN: f32 = 3.0;
 /// Spin of a whole-body bounce per unit of (contact offset from the centre x bounce speed), and its cap (rad/s).
 const SPIN: f32 = 2.0;
 const MAX_SPIN: f32 = 8.0;
+/// A hit push slower than this sideways (units/s: retail barely moved him) goes backwards from where he faces at this speed.
+const HIT_MIN: f32 = 1.0;
+const HIT_BACK: f32 = 8.0;
+/// A hit push moves the whole body as one: the same speed for every part plus a spin about its centre (rad/s per unit/s of the
+/// sideways push, capped at `MAX_SPIN`) that tips the head along the push, so he topples over his feet. The first version gave
+/// the top more speed than the legs instead: on a big launch the joints could not hold that and a limb stretched out, then snapped
+/// back. The push itself is capped at `HIT_MAX` (units/s).
+const HIT_SPIN: f32 = 0.4;
+/// `RAC_RAGDOLL_LOG`: a `stretch` line when a joint's two bodies are further apart than this at its pivot (units).
+const STRETCH_LOG: f32 = 0.1;
+const HIT_MAX: f32 = 22.0;
+/// Camera follow (`cam_offset`): the share of the way to the body's offset the camera moves each field, and how much of the
+/// height difference it follows (lying down, the pelvis is a third of his standing height; a full drop dipped the view too far).
+const CAM_EASE: f32 = 0.15;
+const CAM_Z: f32 = 0.5;
+/// The followed camera stays at least this far from the body's pelvis (units). Hits throw him back toward the camera, which eases
+/// after him, and the body flew into the lens: a tail or an ear across the screen (screenshot 2026-10-26).
+const CAM_MIN: f32 = 2.0;
+/// The followed camera moves at most this far up or down (units): a body that fell down a drop took the camera with it.
+const CAM_DZ: f32 = 1.5;
+/// Ledges, while the game's Ratchet stands: no floor under the pelvis within `EDGE_DEPTH` of his feet is a drop, and the body
+/// may not move out over it (its outward speed is taken off, and it is drawn back toward him at `EDGE_BACK` units/s). Below
+/// `DROP_MAX` under his feet it is lifted back, whatever is under it. With the 6 unit leash a thrown body went over a ledge
+/// and fell out of the world (logs 2026-10-26: pelvis at z -102 with him at z 48).
+const EDGE_DEPTH: f32 = 2.0;
+const EDGE_BACK: f32 = 1.0;
+const DROP_MAX: f32 = 3.0;
 
 fn tune() -> Tune {
 	static CACHE: std::sync::Mutex<Option<(std::time::Instant, Tune)>> = std::sync::Mutex::new(None);
@@ -141,6 +176,9 @@ fn tune() -> Tune {
 			"limits" if v.len() >= 3 => t.limits = [v[0], v[1], v[2]],
 			"tether" => t.tether = x,
 			"bounce" if v.len() >= 3 => t.bounce = [v[0], v[1], v[2]],
+			"hitpush" => t.hitpush = x,
+			"hitlift" => t.hitlift = x,
+			"hitleash" => t.hitleash = x,
 			_ => {}
 		}
 	}
@@ -238,9 +276,18 @@ pub(super) struct Ragdoll {
 	/// The bodies' frames from the animation last field (world), for the start motion.
 	prev: Option<(u32, Vec<(V3, Q)>)>,
 	flop: u8,
-	/// Fields in a row the body was nearly still (`REST_FIELDS`: at rest), and the game's Ratchet's height then.
+	/// Fields in a row the body was nearly still (`REST_FIELDS`: at rest), and where the game's Ratchet stood then.
 	still: u32,
-	rest_z: f32,
+	rest_at: V3,
+	/// The id of the last hit push added (`Cue::push`).
+	push_seen: Option<u32>,
+	/// This ragdoll was hit: the pelvis's leash is `hitleash` and nothing pulls him back inside it (first test: at the old 1 unit
+	/// hard limit the thrown body stopped dead in the air "like an invisible barrier"). The get-up blend brings him back.
+	thrown: bool,
+	/// The camera's offset toward the limp body (`cam_place`): last field's and this field's.
+	cam: [V3; 2],
+	/// The body's pelvis, last field's and this field's, while the camera follows it (None: not limp or the setting is off).
+	cam_body: Option<[V3; 2]>,
 }
 
 impl Ragdoll {
@@ -255,6 +302,8 @@ impl Ragdoll {
 		if mats.len() != HERO_JOINTS || a.skeleton.parents.len() != HERO_JOINTS {
 			self.active = false;
 			self.prev = None;
+			self.cam = [[0.0; 3]; 2];
+			self.cam_body = None;
 			return None;
 		}
 		let ticked = self.last_field != Some(field);
@@ -271,6 +320,7 @@ impl Ragdoll {
 					}
 				}
 				self.prev = Some((field, self.frames(&anim, place)));
+				self.follow_cam([0.0; 3], None);
 			}
 			return None;
 		}
@@ -283,14 +333,59 @@ impl Ragdoll {
 			for _ in 0..steps {
 				self.step(dt, &anim, place, cue, world);
 			}
+			if crate::retail::ragdoll::log_on() {
+				// A joint pulled apart (the pivot as each of its two bodies sees it): a stretched limb on screen.
+				let gap = |jt: &Joint| length(sub(add(self.bodies[jt.p].x, qrot(self.bodies[jt.p].q, jt.rp)), add(self.bodies[jt.c].x, qrot(self.bodies[jt.c].q, jt.rc))));
+				if let Some((k, g)) = self.joints.iter().map(gap).enumerate().max_by(|a, b| a.1.total_cmp(&b.1)).filter(|(_, g)| *g > STRETCH_LOG) {
+					eprintln!("ragdoll: stretch field {field} joint {} gap {g:.2} ({:?}, thrown {})", JOINTS[k].2, cue.phase, self.thrown);
+				}
+			}
 			if crate::retail::ragdoll::log_on() && field % 30 == 0 {
 				let p = self.bodies[0].x;
 				eprintln!("ragdoll: step field {field} {steps} step(s) {:.2} ms, {} faces near, pelvis z {:.2} (game z {:.2})", t0.elapsed().as_secs_f32() * 1000.0, self.faces_near(world, dt).len(), p[2], place.pos[2]);
+				let c = self.cam[1];
+				eprintln!("ragdoll: where field {field} pelvis {:.2} {:.2} {:.2} game {:.2} {:.2} {:.2} apart {:.2} camera offset {:.2} {:.2} {:.2} thrown {}", p[0], p[1], p[2], place.pos[0], place.pos[1], place.pos[2], (p[0] - place.pos[0]).hypot(p[1] - place.pos[1]), c[0], c[1], c[2], self.thrown);
+				LIMP_LOG.store(true, std::sync::atomic::Ordering::Relaxed);
 			}
+		}
+		if let Some((pid, v)) = cue.push {
+			if self.push_seen != Some(pid) {
+				self.push_seen = Some(pid);
+				if !cue.frozen {
+					self.hit(v, place);
+				}
+			}
+		}
+		if ticked {
+			// The camera eases toward the body (less of it while he gets up), measured between the body's pelvis and the game's.
+			let on = crate::plugins::value_at_start(crate::retail::ragdoll::ID, "camera") == 1;
+			let s = if cue.phase == Phase::GetUp { smoothstep(cue.blend) } else { 0.0 };
+			let d = sub(self.bodies[0].x, self.frames(&anim, place)[0].0);
+			let d = [d[0], d[1], d[2].clamp(-CAM_DZ / CAM_Z, CAM_DZ / CAM_Z)];
+			let pelvis = self.bodies[0].x;
+			self.follow_cam(if on { scale([d[0], d[1], d[2] * CAM_Z], 1.0 - s) } else { [0.0; 3] }, on.then_some(pelvis));
 		}
 		let logic = mats.to_vec();
 		self.pose(mats, &anim, a, place, cue);
 		Some(logic)
+	}
+
+	fn follow_cam(&mut self, target: V3, body: Option<V3>) {
+		let now = self.cam[1];
+		self.cam = [now, add(now, scale(sub(target, now), CAM_EASE))];
+		self.cam_body = body.map(|b| [self.cam_body.map_or(b, |c| c[1]), b]);
+	}
+
+	/// Where to draw from: the game's camera `eye` moved to follow the limp body (Camera follow setting) and kept `CAM_MIN` off it,
+	/// between the last two fields like the drawn hero (`alpha` = the frame-smoothing blend, 1 = the newest field). `eye` as it is
+	/// when he is not limp.
+	pub(super) fn cam_place(&self, eye: V3, alpha: f32) -> V3 {
+		let lerp = |a: V3, b: V3| add(a, scale(sub(b, a), alpha));
+		let at = add(eye, lerp(self.cam[0], self.cam[1]));
+		let Some(body) = self.cam_body.map(|b| lerp(b[0], b[1])) else { return at };
+		let d = sub(at, body);
+		let l = length(d);
+		if l < CAM_MIN && l > 1e-4 { add(body, scale(d, CAM_MIN / l)) } else { at }
 	}
 
 	/// The body frames (centre, rotation) of the animated pose, in the world.
@@ -340,6 +435,11 @@ impl Ragdoll {
 				Body { x, q, v, w, xp: x, qp: q, im: 1.0 / d.mass, ii: capsule_ii(d.mass, d.r, len, axis), spheres }
 			})
 			.collect();
+		if cue.from_hit {
+			for b in self.bodies.iter_mut() {
+				(b.v, b.w) = ([0.0; 3], [0.0; 3]);
+			}
+		}
 		// A landing: retail has already stopped him, so the body takes the speed he hit the ground with (the pelvis moves at it, the
 		// limbs keep their own motion on top).
 		if let Some(iv) = cue.impact {
@@ -386,9 +486,30 @@ impl Ragdoll {
 		self.flop = cue.flop;
 		self.active = true;
 		self.still = 0;
+		self.thrown = false;
 		if crate::retail::ragdoll::log_on() {
 			let v = self.bodies[0].v;
 			eprintln!("ragdoll: body start id {} pelvis at {:.2} {:.2} {:.2} moving {:.2} {:.2} {:.2}", cue.id, self.bodies[0].x[0], self.bodies[0].x[1], self.bodies[0].x[2], v[0], v[1], v[2]);
+		}
+	}
+
+	/// An enemy hit (`Cue::push`): throws the body with retail's knock-back, or backwards when retail hardly moved him, and wakes it.
+	fn hit(&mut self, knock: V3, place: Place) {
+		let t = tune();
+		let side = if knock[0].hypot(knock[1]) < HIT_MIN { place.to_world_v([-HIT_BACK, 0.0, 0.0]) } else { scale(knock, t.hitpush) };
+		let v = clamp_len([side[0], side[1], side[2].max(0.0) + t.hitlift], HIT_MAX);
+		let flat = v[0].hypot(v[1]);
+		let spin = if flat > 1e-3 { scale(cross([0.0, 0.0, 1.0], [v[0] / flat, v[1] / flat, 0.0]), (flat * HIT_SPIN).min(MAX_SPIN)) } else { [0.0; 3] };
+		let mass: f32 = self.bodies.iter().map(|b| 1.0 / b.im).sum();
+		let com = scale(self.bodies.iter().fold([0.0; 3], |c, b| add(c, scale(b.x, 1.0 / b.im))), 1.0 / mass);
+		for b in self.bodies.iter_mut() {
+			b.v = add(b.v, add(v, cross(spin, sub(b.x, com))));
+			b.w = add(b.w, spin);
+		}
+		self.still = 0;
+		self.thrown = true;
+		if crate::retail::ragdoll::log_on() {
+			eprintln!("ragdoll: body hit push {:.2} {:.2} {:.2}", v[0], v[1], v[2]);
 		}
 	}
 
@@ -401,13 +522,13 @@ impl Ragdoll {
 		let target = tr(&place.to_world(&anim[1]));
 		if self.still >= REST_FIELDS {
 			// At rest; woken when the game's Ratchet moves away from it (a moving platform, a knock-back).
-			let off = sub(target, self.bodies[0].x);
-			if off[0].hypot(off[1]) < REST_WAKE && (place.pos[2] - self.rest_z).abs() < REST_WAKE {
+			// Measured against where he was, not against the body: a thrown body rests away from him (`thrown`).
+			if length(sub(place.pos, self.rest_at)) < REST_WAKE {
 				return;
 			}
 			self.still = 0;
 		}
-		self.rest_z = place.pos[2];
+		self.rest_at = place.pos;
 		let up = add(place.pos, [0.0, 0.0, 0.3]);
 		let floor = (cue.phase != Phase::Fall && world.ground(up, 0.6).is_none_or(|(z, _)| (z - place.pos[2]).abs() > 0.15)).then_some(place.pos[2]);
 		// Water faces (surface 0) do not hold the body (the hero's own rule).
@@ -484,15 +605,47 @@ impl Ragdoll {
 					}
 				}
 			}
-			// The tether: sideways only, so he can lie on the ground below his standing pelvis.
-			let pel = &mut self.bodies[0];
-			let mut off = sub(target, pel.x);
+			// The tether: sideways only, so he can lie on the ground below his standing pelvis. The soft pull moves the pelvis (the
+			// joints bring the rest); the hard limit moves the whole body as one, which also takes the outward speed off every part.
+			// Moving only the pelvis there left a limb hanging apart from the body for a moment before the joints pulled it back.
+			let mut off = sub(target, self.bodies[0].x);
 			off[2] = 0.0;
 			let d = length(off);
 			if d > 1e-5 {
-				let hard = (d - TETHER_MAX).max(0.0);
-				let soft = (d - hard) * (t.tether * h).min(1.0);
-				push_body(pel, scale(off, (hard + soft) / d), [0.0; 3], 0.0, h);
+				let (max, pull) = if self.thrown { (t.hitleash, 0.0) } else { (TETHER_MAX, t.tether) };
+				let hard = (d - max).max(0.0);
+				let soft = (d - hard) * (pull * h).min(1.0);
+				if hard > 0.0 {
+					let shift = scale(off, hard / d);
+					for b in self.bodies.iter_mut() {
+						b.x = add(b.x, shift);
+					}
+				}
+				push_body(&mut self.bodies[0], scale(off, soft / d), [0.0; 3], 0.0, h);
+			}
+			if cue.phase != Phase::Fall {
+				// Ledges (`EDGE_DEPTH`): moved as one body, like the hard leash.
+				let pel = self.bodies[0].x;
+				let mut back = sub(target, pel);
+				back[2] = 0.0;
+				let bl = length(back);
+				let dir = if bl > 1e-4 { scale(back, 1.0 / bl) } else { [0.0; 3] };
+				let feet = place.pos[2];
+				let drop = world.ground(add(pel, [0.0, 0.0, 0.3]), EDGE_DEPTH + 0.3 + (pel[2] - feet).max(0.0)).is_none_or(|(z, _)| z < feet - EDGE_DEPTH);
+				let mut shift = [0.0; 3];
+				if drop {
+					let out = (-dot(self.bodies[0].v, dir)).max(0.0);
+					shift = scale(dir, (out * h + EDGE_BACK * h).min(bl));
+				}
+				let low = feet - DROP_MAX - pel[2];
+				if low > 0.0 {
+					shift = add(shift, [dir[0] * low.min(bl), dir[1] * low.min(bl), low]);
+				}
+				if shift != [0.0; 3] {
+					for b in self.bodies.iter_mut() {
+						b.x = add(b.x, shift);
+					}
+				}
 			}
 			for b in self.bodies.iter_mut() {
 				b.v = scale(sub(b.x, b.xp), 1.0 / h);
@@ -596,11 +749,17 @@ impl Ragdoll {
 			let m = place.to_model(&mul34(&frame(b.x, b.q), &off));
 			by_joint[j] = Some(if s > 0.0 { blend34(&m, &anim[j], s) } else { m });
 		}
+		// The root (joint 0) and any other parentless joint sit at the game's Ratchet's feet. Left there, the vertices weighted to
+		// them stayed behind when the body was thrown and stretched into a line from his feet to the limp body; they ride the
+		// pelvis instead, as if rigidly attached to it.
+		let pelvis = by_joint[1].map(|m| mul34(&m, &inv34(&anim[1])));
+		let rigid = |j: usize| pelvis.map_or(anim[j], |d| mul34(&d, &anim[j]));
+		out[0] = rigid(0);
 		for j in 1..HERO_JOINTS {
 			out[j] = match (by_joint[j], parents[j]) {
 				(Some(m), _) => m,
 				(None, Some(p)) => mul34(&out[p], &mul34(&inv34(&anim[p]), &anim[j])),
-				(None, None) => anim[j],
+				(None, None) => rigid(j),
 			};
 		}
 		for j in 0..HERO_JOINTS {
