@@ -1,6 +1,9 @@
 # Ray-traced reflections: plan
 
-Status: planned (2026-10-28), nothing built yet. A new built-in mod, **Ray-traced reflections** (`rt-reflections`), next to
+Status (2026-10-28): phase 1 built and checked at start-up (the run log says `rt reflections: on, quality Performance`); not yet
+measured in a level. Next: phase 2.
+
+A new built-in mod, **Ray-traced reflections** (`rt-reflections`), next to
 Ray-traced shadows and Ray-traced sun rays. It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics
 card with ray tracing, and it brings that structure up on its own when it is the only ray-traced mod switched on.
 
@@ -77,9 +80,13 @@ A second setting may come later if testing calls for it: `Surfaces`: *Water and 
 
 ## Measuring cost honestly
 
-So far the RT work has been measured with the FPS overlay and nvidia-smi. That is too rough for a 0.5 ms budget. Phase 1 adds
-GPU timestamps (`wgpu::Features::TIMESTAMP_QUERY`, when the adapter has it) around the reflection passes. With `RAC_PERF_LOG`,
-they are logged as a rolling average per pass, so every phase can report "reflections: X ms" at fixed test spots.
+So far the RT work has been measured with the FPS overlay and nvidia-smi. That is too rough for a 0.5 ms budget. The game
+already has a GPU pass timer: `RAC_GPU_PASSES=120` (`viewer/passtime.rs`, wgpu timestamp queries; the value is how many frames each line averages, so `=1` prints every frame) prints a `gpupass:` line to the
+run log with each pass's average GPU ms. Phase 1 put the existing RT passes on it (`rt shadow mask`,
+`rt rays`). Every new reflection pass takes its stamps from `passtime::cw` / `rw` too, so every phase can report
+"reflections: X ms" at fixed test spots. Not timed: the per-frame build of the moving things' structure
+(`build_acceleration_structures` is not a pass; it would need `TIMESTAMP_QUERY_INSIDE_ENCODERS`). Its CPU side is in the
+`rt movers` log summary.
 
 Test spots (the same each phase, with `--shot` A/B screenshots of the screen-space vs traced reflections):
 - Kerwan spawn and the terrace (lots of ties and shrubs, few reflections: checks that the cost stays near zero when there is
@@ -94,7 +101,7 @@ Test spots (the same each phase, with `--shot` A/B screenshots of the screen-spa
 | # | Step | Result |
 |---|------|--------|
 | 0 | Commit or stash the Ragdoll and Hoverboard work in progress, so this work gets clean diffs | Clean baseline |
-| 1 | The built-in mod (`plugins.rs`, Quality setting, `RAC_RT_REFLECTIONS` env force); `rtshadow::wanted()` includes it; GPU timestamps in `RAC_PERF_LOG` | Mod switches on, structure built, costs measurable; nothing visible yet |
+| 1 | The built-in mod (`plugins.rs`, Quality setting, `RAC_RT_REFLECTIONS` env force, `viewer/rtrefl.rs`); `rtshadow::wanted()` includes it; the RT passes timed by `RAC_GPU_PASSES` | Mod switches on, structure built, costs measurable; nothing visible yet |
 | 2 | Hit data: vertex buffers + compact index buffer + per-triangle texture slot as storage; WGSL `rt_hit(p, r, reach)` returning colour and distance (texel × vertex colour, misses give the sky) | A debug view (`RAC_POST_VIEW=rtrefl`) showing the hit colour of every pixel's mirror ray |
 | 3 | Water, Performance: a compute pass at quarter size over the water mask traces only where `reflect_ray` gives low confidence and no mirror plane applies; `fs_water` reads it in place of `env()` | **First visible step:** no more fog reflections at screen edges / looking down. Budget ≤ 0.5 ms |
 | 4 | Re-projection: hits take last frame's picture where its depth matches (Performance and up) | Reflections match the real picture, Ratchet included when he was on screen |
@@ -118,6 +125,9 @@ Test spots (the same each phase, with `--shot` A/B screenshots of the screen-spa
 - **Lower-end RTX cards** (2060, 3060): the budget is set on a 3080 Ti, so roughly 2–3× it on those. Performance should still
   stay around 1–1.5 ms there. Check on a weaker card if one is available, or with a lower GPU clock.
 - **Split view** (`DrawFx.water_on` per view): the reflection pass needs one target per view, like the water targets.
+- **Dynamic shadows dependency.** The level structure and the moving things are built only while the sun is shadowed
+  (`gpu/draw/prepare.rs`: Lighting Enhanced with Dynamic shadows on), as the other RT mods need. Reflections should not need
+  Dynamic shadows: by phase 3, build the structure whenever this mod is on and the water or metal is drawn.
 
 ## Files
 

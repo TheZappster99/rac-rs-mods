@@ -90,6 +90,29 @@ impl Plugin for RtSunRays {
 	}
 }
 
+/// Ray-traced reflections (viewer/rtrefl.rs; RT_REFLECTIONS_PLAN.md): water and chrome reflect the real level, traced through the
+/// same structure as the shadows (any of the three mods brings it up). Quality picks how much is traced (each level has a GPU
+/// time budget); Performance only fills in where the screen-space reflection finds nothing.
+struct RtReflections;
+
+impl Plugin for RtReflections {
+	fn id(&self) -> &'static str {
+		"rt-reflections"
+	}
+	fn name(&self) -> &'static str {
+		"Ray-traced reflections"
+	}
+	fn description(&self) -> &'static str {
+		"Water and shiny metal reflect the real level, traced by the graphics card, including things off screen or behind you. Quality: Performance only fills in what the usual reflections miss and costs little; Balanced and Ultra trace more and look better but cost more. Needs Vulkan and a graphics card with ray tracing. In development: nothing changes on screen yet. Built into the game."
+	}
+	fn env_force(&self) -> Option<&'static str> {
+		Some("RAC_RT_REFLECTIONS")
+	}
+	fn settings(&self) -> &'static [Setting] {
+		&[Setting { id: "quality", name: "Quality", values: &["Performance", "Balanced", "Ultra"], default: 0 }]
+	}
+}
+
 /// Ragdoll Ratchet (retail/ragdoll.rs, viewer/ragdoll.rs; RAGDOLL_PLAN.md): a big fall, L3 in the air or an enemy hit makes Ratchet go limp
 /// and flop; he gets up after the limp time. Only the picture and the pad while he is limp change.
 struct RagdollRatchet;
@@ -156,7 +179,7 @@ impl Plugin for Hoverboard {
 }
 
 /// Every built-in mod, in menu order. A new one is a type implementing `Plugin` and one entry here.
-static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays, &RagdollRatchet, &Hoverboard];
+static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays, &RtReflections, &RagdollRatchet, &Hoverboard];
 
 // ---- state ------------------------------------------------------------------------------------------------------------------
 

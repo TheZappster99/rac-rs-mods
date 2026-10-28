@@ -58,6 +58,7 @@ mod sunshadow;
 mod rtshadow;
 mod rtrays;
 mod rtmovers;
+mod rtrefl;
 mod waterfx;
 mod under_detect; mod underwater;
 mod icefx; mod texfilter;

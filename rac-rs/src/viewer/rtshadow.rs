@@ -41,9 +41,9 @@ fn wanted_shadows() -> bool {
 	crate::plugins::on_at_start("rt-shadows")
 }
 
-/// The level's structure is wanted by the shadows or by the sun rays (rtrays.rs).
+/// The level's structure is wanted by the shadows, the sun rays (rtrays.rs) or the reflections (rtrefl.rs).
 fn wanted() -> bool {
-	wanted_shadows() || super::rtrays::wanted()
+	wanted_shadows() || super::rtrays::wanted() || super::rtrefl::wanted()
 }
 
 /// The device features to request: ray queries when wanted and the adapter traces in hardware (Vulkan only in wgpu 30).
@@ -67,6 +67,7 @@ pub(super) fn enable(device: &wgpu::Device) {
 	if on {
 		eprintln!("rt shadows: {} (hardware ray queries)", if shadows() { "on" } else { "structure only, the shadows stay shadow maps" });
 	}
+	super::rtrefl::announce(on);
 }
 
 /// The device traces and the level's structure is built (for the shadows, the sun rays or both).
@@ -519,7 +520,7 @@ impl RtShadow {
 		}
 		let Some((_, bind)) = &self.mask_bind else { return };
 		{
-			let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rt shadow mask"), timestamp_writes: None });
+			let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rt shadow mask"), timestamp_writes: crate::viewer::passtime::cw("rt shadow mask") });
 			pass.set_pipeline(&self.mask_pipeline);
 			pass.set_bind_group(0, bind, &[]);
 			pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);

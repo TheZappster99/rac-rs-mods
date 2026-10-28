@@ -207,7 +207,7 @@ impl RtRays {
 			self.binds = Some((generation, march, blur));
 		}
 		let Some((_, march, blur)) = &self.binds else { return };
-		let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rt rays"), timestamp_writes: None });
+		let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rt rays"), timestamp_writes: crate::viewer::passtime::cw("rt rays") });
 		pass.set_pipeline(&self.march);
 		pass.set_bind_group(0, march, &[]);
 		pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
