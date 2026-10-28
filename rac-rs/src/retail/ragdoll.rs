@@ -51,6 +51,8 @@ const HURT_STATES: [u32; 2] = [0x16, 0x3c];
 const LEDGE_GROUP: u32 = 3;
 /// Game modes that only pause the ragdoll (a menu, the map): everything else but gameplay (0) ends it.
 const MENU_MODES: [u32; 2] = [1, 3];
+/// An in-engine cutscene (snapshot.rs `arrived`): the scene's own Ratchet is drawn, and L3 (setting `scenes`) makes him go limp.
+const SCENE_MODE: u32 = 2;
 /// The get-up: long enough for the renderer's get-up clip (viewer/ragdoll.rs `GetUp`: settle into the clip's first pose, play it,
 /// settle into the game's pose). The free get-up after `EDGE_FALL_STATES` is the quick plain blend: the pad is his then.
 const GETUP_S: f32 = 1.4;
@@ -118,6 +120,8 @@ pub struct Cue {
 	pub from_hit: bool,
 	/// The quick get-up with the pad free (`EDGE_FALL_STATES`): the renderer blends straight to the game's pose, no clip.
 	pub free: bool,
+	/// A ragdoll in a cutscene: the scene owns the camera, so the camera does not follow the body.
+	pub scene: bool,
 	/// Counts the fields the worker ran the mod for (not the menus): the renderer steps the body once per new value. Its own field
 	/// count runs on in the pause menu, where this cue is not renewed, and the body went on falling and settling behind the menu.
 	pub tick: u32,
@@ -158,6 +162,8 @@ struct Mod {
 	from_hit: bool,
 	/// The get-up after `EDGE_FALL_STATES`: the pad is not locked.
 	free: bool,
+	/// This ragdoll started in a cutscene (`SCENE_MODE`); it ends when the scene does.
+	scene: bool,
 	phase: Phase,
 	/// Fields in the phase.
 	t: u32,
@@ -202,6 +208,7 @@ pub fn pre_field(m: &mut Machine) {
 	let bounce = setting("bounce").min(2);
 	let hits = setting("hits") == 1;
 	let guard = setting("guard") == 1;
+	let scenes = setting("scenes") == 1;
 
 	let mut g = MOD.lock().unwrap();
 	let s = g.get_or_insert_with(Mod::default);
@@ -209,6 +216,7 @@ pub fn pre_field(m: &mut Machine) {
 	s.last_buttons = s.buttons;
 
 	let mode = m.rd32(va(GAME_MODE));
+	let scene = mode == SCENE_MODE;
 	let form = m.rd8(BODY_FORM);
 	let health = m.rd32(HEALTH) as i32;
 	let state = m.rd32(HERO_STATE);
@@ -231,6 +239,7 @@ pub fn pre_field(m: &mut Machine) {
 	s.tick = s.tick.wrapping_add(1);
 	// An enemy hit: the hit reaction starting, or health going down anywhere but in lava (the hit reaction can show a field late).
 	let hit = hits
+		&& !scene
 		&& s.hit_cool == 0
 		&& ((state == HIT_STATE && s.last_state != HIT_STATE) || (health < s.last_health && state != LAVA_STATE));
 	let shielded = guard && (s.guard > 0 || s.phase == Phase::GetUp);
@@ -242,7 +251,40 @@ pub fn pre_field(m: &mut Machine) {
 	s.guard = s.guard.saturating_sub(1);
 	s.last_state = state;
 	s.last_health = health;
-	if mode != 0 || form != 0 || health <= 0 || teleport || cancel_state(state) {
+	if scene {
+		// An in-engine cutscene: the scene spawns its own Ratchet and plays him (snapshot.rs), and the renderer's ragdoll replaces
+		// that drawn pose like the hero's. L3 makes him go limp for the limp time; then he blends straight back into the scene's
+		// pose (`free`: he may be sitting or mid-gesture, so no get-up clip). The placed hero's state and position mean nothing here.
+		if s.phase != Phase::Off && !s.scene {
+			// A ragdoll from gameplay when the scene starts: the scene's Ratchet takes over the picture.
+			s.phase = Phase::Off;
+			s.air = None;
+			s.hit = None;
+		}
+		match s.phase {
+			Phase::Off => {
+				if scenes && button && pressed & PAD_L3 != 0 {
+					s.phase = Phase::Ground;
+					s.id = s.id.wrapping_add(1);
+					s.air = None;
+					s.impact = None;
+					s.from_hit = false;
+					s.free = true;
+					s.scene = true;
+				}
+			}
+			Phase::Fall | Phase::Ground => {
+				if s.down >= limp {
+					s.phase = Phase::GetUp;
+				}
+			}
+			Phase::GetUp => {
+				if s.t >= getup(true) {
+					s.phase = Phase::Off;
+				}
+			}
+		}
+	} else if mode != 0 || s.scene || form != 0 || health <= 0 || teleport || cancel_state(state) {
 		s.phase = Phase::Off;
 		s.air = None;
 		s.hit = None;
@@ -341,6 +383,7 @@ pub fn pre_field(m: &mut Machine) {
 	if s.phase == Phase::Off {
 		s.push = None;
 		s.free = false;
+		s.scene = false;
 	}
 	if restart {
 		s.t = 0;
@@ -363,12 +406,13 @@ pub fn pre_field(m: &mut Machine) {
 		s.down += 1;
 	}
 	let hit_getup = guard && s.from_hit && s.phase == Phase::GetUp;
+	// In a cutscene the scene owns the pad (`free`), so nothing is locked.
 	if s.phase != Phase::Off && !s.free && !hit_getup {
 		// Only Start (pause) and the camera stick reach the game while he is limp.
 		m.set_pad(s.buttons & PAD_START, [s.sticks[0], s.sticks[1], 0x80, 0x80]);
 	}
 	let blend = if s.phase == Phase::GetUp { (s.t as f32 / getup(s.free).max(1) as f32).min(1.0) } else { 0.0 };
-	s.cue = Cue { id: s.id, phase: s.phase, blend, frozen: false, flop, bounce, impact: s.impact, push: s.push, from_hit: s.from_hit, free: s.free, tick: s.tick };
+	s.cue = Cue { id: s.id, phase: s.phase, blend, frozen: false, flop, bounce, impact: s.impact, push: s.push, from_hit: s.from_hit, free: s.free, scene: s.scene, tick: s.tick };
 }
 
 // ---- the measuring tools ----------------------------------------------------------------------------------------------------

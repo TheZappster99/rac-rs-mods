@@ -70,6 +70,13 @@ knockdown guard and the landing grunt are approved. Still open: Clank left behin
   (`CAM_Z`), faded out over the get-up, blended between fields like the hero. Drawing only, nothing written. No camera collision
   on the offset: watch for the view clipping into walls after a throw.
 - Untested: the Thruster-Pack (0x10), pits and water while limp, moving platforms, cutscenes, the PAL disc, other planets.
+- **Cutscenes** (setting `scenes`, Cutscenes Off / On, default On; built 2026-10-28, **tested**: the O2 mask seller's scene, USA disc; the player: "that worked perfectly"): in-engine
+  scenes run in game mode 2, where a scene spawns its own class-0 Ratchet and the snapshot draws that one, so the renderer's ragdoll
+  already replaces its pose. In mode 2, L3 (with the Ragdoll button on) makes him go limp (`Phase::Ground`, `free`, `Cue::scene`)
+  for the limp time, then he blends straight back into the scene's pose (no get-up clip). No pad lock, no camera follow (the scene's
+  camera is scripted), no hit knockdowns; a gameplay ragdoll ends when a scene starts, and a scene ragdoll ends when it stops.
+  FMV movies are video and cannot ragdoll. Watch for: the body falling through scene props with no collision, the leash tugging
+  when the scene moves him, Clank / props held by the scene's Ratchet.
 - **Get-up clips (phase 5)**: built and tested 2026-10-27, the player likes the look ("I really like how that looks"), but
   wanted him up sooner: the Limp time values are halved (0.75 / 1.5 / 2.5 s; tested: "much better").
 - **Knockdown guard** (setting `guard`, default On; built 2026-10-27, not tested in game yet): small enemies in

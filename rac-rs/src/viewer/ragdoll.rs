@@ -487,7 +487,8 @@ impl Ragdoll {
 		}
 		if ticked {
 			// The camera eases toward the body (less of it while he gets up), measured between the body's pelvis and the game's.
-			let on = crate::plugins::value_at_start(crate::retail::ragdoll::ID, "camera") == 1;
+			// Not in a cutscene: the scene's camera is scripted around where the scene puts him.
+			let on = crate::plugins::value_at_start(crate::retail::ragdoll::ID, "camera") == 1 && !cue.scene;
 			let s = match &self.getup {
 				Some(g) if cue.phase == Phase::GetUp => g.slide(cue.blend, &tune()),
 				_ => plain_blend(cue),
