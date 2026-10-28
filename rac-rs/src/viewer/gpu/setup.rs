@@ -26,7 +26,7 @@ impl Gpu {
 			},
 			false => wgpu::DeviceDescriptor { required_features: stencil_feature, required_limits: wgpu::Limits { max_storage_buffer_binding_size: storage_bind, ..Default::default() }, ..Default::default() },
 		};
-		// [PC] Ray-traced sun shadows (rtshadow.rs, the Ray-traced shadows mod): wgpu's ray queries are experimental and need its opt-in.
+		// [PC] Ray tracing (rtshadow.rs, the Ray tracing mod): wgpu's ray queries are experimental and need its opt-in.
 		let rt = super::rtshadow::features(&adapter);
 		let mut desc = desc;
 		if !rt.is_empty() {

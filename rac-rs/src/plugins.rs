@@ -51,67 +51,44 @@ pub trait Plugin: Sync {
 
 // ---- the built-in mods of this build ----------------------------------------------------------------------------------------
 
-/// Ray-traced sun shadows (viewer/rtshadow.rs): a Vulkan adapter with hardware ray queries, Lighting Enhanced and Dynamic shadows
-/// on. The device feature is requested when the window opens.
-struct RtShadows;
+/// Ray tracing (viewer/rtshadow.rs, rtrays.rs, rtrefl.rs): every ray-traced effect in one mod, each part a setting of its own.
+/// The parts trace through one structure of the level, which comes up when any part is on; a Vulkan adapter with hardware ray
+/// queries. The device feature is requested when the window opens. `rtshadow::part` reads a part's setting.
+/// - Shadows: the sun shadows traced (Lighting Enhanced and Dynamic shadows on).
+/// - Sun rays: light shafts in the air, in place of the screen-space Sun rays (Lighting Enhanced, Dynamic shadows and Sun rays on).
+/// - Reflections (RT_REFLECTIONS_PLAN.md): water and chrome reflect the real level; the value is the quality, each with a GPU time
+///   budget (Performance only fills in where the screen-space reflection finds nothing).
+/// The parts' old dev switches still force them on: RAC_RT_SHADOWS, RAC_RT_RAYS, RAC_RT_REFLECTIONS.
+struct RayTracing;
 
-impl Plugin for RtShadows {
+impl Plugin for RayTracing {
 	fn id(&self) -> &'static str {
-		"rt-shadows"
+		RAY_TRACING
 	}
 	fn name(&self) -> &'static str {
-		"Ray-traced shadows"
+		"Ray tracing"
 	}
 	fn description(&self) -> &'static str {
-		"Sharper, more exact sun shadows traced by the graphics card. Needs Vulkan and a graphics card with ray tracing, and Lighting Enhanced with Dynamic shadows on. Built into the game."
+		"Effects traced by the graphics card, each switched in the settings. Shadows: sharper, more exact sun shadows. Sun rays: shafts of sunlight in the air, in place of the usual Sun rays. Reflections: water and shiny metal reflect the real level, even things off screen or behind you; Performance only fills in what the usual reflections miss and costs little, Balanced and Ultra trace more and cost more (in development: no change on screen yet). Needs Vulkan and a graphics card with ray tracing, and Lighting Enhanced with Dynamic shadows on. Built into the game."
 	}
 	fn env_force(&self) -> Option<&'static str> {
-		Some("RAC_RT_SHADOWS")
-	}
-}
-
-/// Ray-traced sun rays (viewer/rtrays.rs): light shafts in the air, traced through the same structure as the shadows (either mod
-/// brings it up), in place of the screen-space Sun rays. Lighting Enhanced, Dynamic shadows and Sun rays on; the Sun rays level
-/// picks how many samples each pixel takes.
-struct RtSunRays;
-
-impl Plugin for RtSunRays {
-	fn id(&self) -> &'static str {
-		"rt-sun-rays"
-	}
-	fn name(&self) -> &'static str {
-		"Ray-traced sun rays"
-	}
-	fn description(&self) -> &'static str {
-		"Shafts of sunlight in the air, traced by the graphics card, in place of the usual Sun rays. Needs Vulkan and a graphics card with ray tracing, and Lighting Enhanced with Dynamic shadows and Sun rays on. Built into the game."
-	}
-	fn env_force(&self) -> Option<&'static str> {
-		Some("RAC_RT_RAYS")
-	}
-}
-
-/// Ray-traced reflections (viewer/rtrefl.rs; RT_REFLECTIONS_PLAN.md): water and chrome reflect the real level, traced through the
-/// same structure as the shadows (any of the three mods brings it up). Quality picks how much is traced (each level has a GPU
-/// time budget); Performance only fills in where the screen-space reflection finds nothing.
-struct RtReflections;
-
-impl Plugin for RtReflections {
-	fn id(&self) -> &'static str {
-		"rt-reflections"
-	}
-	fn name(&self) -> &'static str {
-		"Ray-traced reflections"
-	}
-	fn description(&self) -> &'static str {
-		"Water and shiny metal reflect the real level, traced by the graphics card, including things off screen or behind you. Quality: Performance only fills in what the usual reflections miss and costs little; Balanced and Ultra trace more and look better but cost more. Needs Vulkan and a graphics card with ray tracing. In development: nothing changes on screen yet. Built into the game."
-	}
-	fn env_force(&self) -> Option<&'static str> {
-		Some("RAC_RT_REFLECTIONS")
+		Some("RAC_RAY_TRACING")
 	}
 	fn settings(&self) -> &'static [Setting] {
-		&[Setting { id: "quality", name: "Quality", values: &["Performance", "Balanced", "Ultra"], default: 0 }]
+		&[
+			Setting { id: "shadows", name: "Shadows", values: &["Off", "On"], default: 1 },
+			Setting { id: "sun_rays", name: "Sun rays", values: &["Off", "On"], default: 1 },
+			Setting { id: "reflections", name: "Reflections", values: &["Off", "Performance", "Balanced", "Ultra"], default: 1 },
+		]
 	}
 }
+
+/// The Ray tracing mod's id (viewer/rtshadow.rs `part` asks for its settings).
+pub const RAY_TRACING: &str = "ray-tracing";
+
+/// Built-in mods that are gone: Ray tracing took over the three ray-traced ones (2026-10-28). Their manifest folders, which the
+/// game wrote, are removed at start-up (`remove_retired`) so the launcher no longer lists them.
+const RETIRED: &[&str] = &["rt-shadows", "rt-sun-rays", "rt-reflections"];
 
 /// Ragdoll Ratchet (retail/ragdoll.rs, viewer/ragdoll.rs; RAGDOLL_PLAN.md): a big fall, L3 in the air or an enemy hit makes Ratchet go limp
 /// and flop; he gets up after the limp time. Only the picture and the pad while he is limp change.
@@ -179,7 +156,7 @@ impl Plugin for Hoverboard {
 }
 
 /// Every built-in mod, in menu order. A new one is a type implementing `Plugin` and one entry here.
-static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays, &RtReflections, &RagdollRatchet, &Hoverboard];
+static PLUGINS: &[&dyn Plugin] = &[&RayTracing, &RagdollRatchet, &Hoverboard];
 
 // ---- state ------------------------------------------------------------------------------------------------------------------
 
@@ -193,6 +170,7 @@ fn state() -> &'static State {
 	static ST: OnceLock<State> = OnceLock::new();
 	ST.get_or_init(|| {
 		let dir = crate::omni::load::mods_dir();
+		remove_retired(&dir);
 		for p in PLUGINS {
 			if let Err(e) = write_manifest(&dir, *p) {
 				eprintln!("plugins: cannot write the {} manifest in {}: {e}", p.id(), dir.display());
@@ -260,6 +238,20 @@ fn write_manifest(dir: &std::path::Path, p: &dyn Plugin) -> std::io::Result<()> 
 	std::fs::write(&file, text)
 }
 
+
+/// Removes the manifest folders of the `RETIRED` built-in mods: only a folder whose `omni-mod.json` the game wrote (it says
+/// `"builtin": true`) and that holds nothing else, so a player's own files are never touched.
+fn remove_retired(dir: &std::path::Path) {
+	for id in RETIRED {
+		let folder = dir.join(id);
+		let file = folder.join("omni-mod.json");
+		let ours = std::fs::read_to_string(&file).is_ok_and(|t| crate::omni::json::parse(&t).ok().is_some_and(|j| j.get("builtin").is_some_and(|b| matches!(b, Json::Bool(true)))));
+		let alone = std::fs::read_dir(&folder).is_ok_and(|d| d.flatten().all(|e| e.file_name() == "omni-mod.json"));
+		if ours && alone && std::fs::remove_file(&file).is_ok() && std::fs::remove_dir(&folder).is_ok() {
+			eprintln!("plugins: removed the retired built-in mod {id} (now part of Ray tracing)");
+		}
+	}
+}
 fn forced(p: &dyn Plugin) -> bool {
 	p.env_force().is_some_and(|k| std::env::var(k).is_ok_and(|v| v == "1"))
 }

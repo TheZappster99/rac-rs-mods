@@ -1,7 +1,7 @@
 # Ray-traced sun shadows: prototype scope
 
 Status: phases 0-6 (moving casters, soft shadows, foliage) built and tested in game (2026-10-25). Code in `rac-rs/src/viewer/rtshadow.rs`; off unless
-`RAC_RT_SHADOWS=1` or the Ray-traced shadows plugin. Committed on the `plugins` branch.
+`RAC_RT_SHADOWS=1` or the Shadows setting of the Ray tracing built-in mod (`ray-tracing`, 2026-10-28; it was a mod of its own, `rt-shadows`).
 
 ## Prototype results (Kerwan, RTX 3080 Ti, Vulkan)
 

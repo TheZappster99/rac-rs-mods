@@ -93,9 +93,9 @@ text ids `0x7fc0..0x8000` (our `titlequit.rs` Quit Game row uses `BASE+0xE000..0
 - **Settings shape**: `fn settings() -> &'static [Setting]` (`id`, `name`, 2..=4 `values`, `default` index), written into the
   manifest as `choice` settings, so the launcher shows them.
 - **Rules** (checked by `plugin_ids_and_names_fit_the_file_and_the_menu`): ids are the loader's mod ids (lower case letters and
-  digits joined by single hyphens, e.g. `rt-shadows`); setting ids `[a-z0-9_]`; names and values are ASCII letters, digits,
+  digits joined by single hyphens, e.g. `ray-tracing`); setting ids `[a-z0-9_]`; names and values are ASCII letters, digits,
   spaces and `-` only (the game's font), names <= 24 chars, values <= 16. Every mod has a `description()` for the launcher.
-- `env_force()` names a `RAC_...` var that forces the mod on when `=1` (keeps old dev switches working, e.g. `RAC_RT_SHADOWS`).
+- `env_force()` names a `RAC_...` var that forces the mod on when `=1` (keeps old dev switches working, e.g. `RAC_RAGDOLL`). A part of a mod can keep its own switch too: the Ray tracing parts read `RAC_RT_SHADOWS`, `RAC_RT_RAYS`, `RAC_RT_REFLECTIONS` (`rtshadow::part`).
 
 ## Dev env vars
 
@@ -106,9 +106,12 @@ text ids `0x7fc0..0x8000` (our `titlequit.rs` Quit Game row uses `BASE+0xE000..0
 
 ## In-progress work
 
-`RT_SHADOWS_PLAN.md` describes an uncommitted ray-traced sun shadow prototype (`rac-rs/src/viewer/rtshadow.rs`, enabled with
-the "Ray-traced shadows" built-in mod (`rt-shadows`) or `RAC_RT_SHADOWS=1`, Vulkan + `EXPERIMENTAL_RAY_QUERY` only). Read it before touching shadows. `build\release\rac-rs.orig.exe`
+`RT_SHADOWS_PLAN.md` describes the ray-traced sun shadows (`rac-rs/src/viewer/rtshadow.rs`, enabled with
+the Shadows setting of the "Ray tracing" built-in mod (`ray-tracing`, which holds every ray-traced effect as a setting: Shadows, Sun rays, Reflections) or `RAC_RT_SHADOWS=1`, Vulkan + `EXPERIMENTAL_RAY_QUERY` only). Read it before touching shadows. `build\release\rac-rs.orig.exe`
 is the untouched exe kept for A/B comparison.
+
+`RT_REFLECTIONS_PLAN.md` describes the ray-traced reflections (`rac-rs/src/viewer/rtrefl.rs`, the Reflections setting of the same mod,
+with a quality and a GPU time budget each). Its status line says which phase is next.
 
 `RAGDOLL_PLAN.md` describes the Ragdoll Ratchet built-in mod (`ragdoll-ratchet`: `retail/ragdoll.rs` worker, `viewer/ragdoll.rs`
 renderer, forced on with `RAC_RAGDOLL=1`). Its "Progress so far" section is the hand-off: what works, the approved tuning, what is next.

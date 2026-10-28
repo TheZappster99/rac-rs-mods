@@ -3,9 +3,9 @@
 Status (2026-10-28): phase 1 built and checked at start-up (the run log says `rt reflections: on, quality Performance`); not yet
 measured in a level. Next: phase 2.
 
-A new built-in mod, **Ray-traced reflections** (`rt-reflections`), next to
-Ray-traced shadows and Ray-traced sun rays. It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics
-card with ray tracing, and it brings that structure up on its own when it is the only ray-traced mod switched on.
+The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
+(2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics
+card with ray tracing, and it brings that structure up on its own when Shadows and Sun rays are off.
 
 **Main rule: it must not tank the frame rate.** The default quality is cheap, and the costly modes are opt-in. Every phase
 is measured against a budget (below) before it counts as done.
@@ -57,9 +57,9 @@ Hit shading will never match the real picture exactly (no particles, no moby lig
 where source 1 fails keeps those differences small. It's also why reflections get blurred by distance and roughness, the same
 as the screen-space ones.
 
-## Quality setting (the mod's one setting)
+## Quality (the Reflections setting: Off / Performance / Balanced / Ultra)
 
-`Quality`: **Performance** (default) / **Balanced** / **Ultra**. Read at start-up, like the other mods' settings.
+**Performance** is the default, then **Balanced** and **Ultra** (Off switches Reflections off). Read at start-up, like every mod setting.
 
 | | Performance | Balanced | Ultra |
 |---|---|---|---|

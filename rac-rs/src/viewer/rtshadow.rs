@@ -1,4 +1,4 @@
-//! [PC] Ray-traced sun shadows, prototype (RAC_RT_SHADOWS=1, with Lighting Enhanced and Dynamic shadows on; a Vulkan adapter
+//! [PC] Ray-traced sun shadows (the Ray tracing built-in mod's Shadows, or RAC_RT_SHADOWS=1; Lighting Enhanced and Dynamic shadows on; a Vulkan adapter
 //! with hardware ray queries, wgpu's EXPERIMENTAL_RAY_QUERY). No retail counterpart. Without the switch or the feature nothing
 //! here runs and the frame is the shadow-map one (sunshadow.rs).
 //!
@@ -31,14 +31,25 @@ const BITS_CAP: usize = 8 << 20;
 /// `rt_tris` header: the first cut triangle of each geometry (vec4 0 and 1); a triangle's record follows at 2 + 2 * index.
 const MAX_GEOS: usize = 8;
 
-/// Set once the device has ray queries and a ray-traced built-in mod is on (`enable`); batches created after it carry `usage`.
+/// Set once the device has ray queries and a part of the Ray tracing mod is on (`enable`); batches created after it carry `usage`.
 static ON: AtomicBool = AtomicBool::new(false);
-/// Set with `ON` when the Ray-traced shadows mod is the one on: the receivers trace (`shadows`).
+/// Set with `ON` when the Ray tracing mod's Shadows part is on: the receivers trace (`shadows`).
 static SHADOWS: AtomicBool = AtomicBool::new(false);
 
-/// The Ray-traced shadows built-in mod (plugins.rs: Mods in the launcher, read at start-up; RAC_RT_SHADOWS=1 still forces it on).
+/// A part of the Ray tracing built-in mod (plugins.rs `RayTracing`, read at start-up): its setting's value (index into its values;
+/// 0 = Off), or 0 while the mod is off. The part's old dev switch `env` set to 1 forces it to at least its first On value.
+pub(super) fn part(setting: &str, env: &str) -> u8 {
+	let id = crate::plugins::RAY_TRACING;
+	let v = if crate::plugins::on_at_start(id) { crate::plugins::value_at_start(id, setting) } else { 0 };
+	match std::env::var(env).is_ok_and(|v| v == "1") {
+		true => v.max(1),
+		false => v,
+	}
+}
+
+/// The Shadows part of the Ray tracing mod (RAC_RT_SHADOWS=1 still forces it on).
 fn wanted_shadows() -> bool {
-	crate::plugins::on_at_start("rt-shadows")
+	part("shadows", "RAC_RT_SHADOWS") > 0
 }
 
 /// The level's structure is wanted by the shadows, the sun rays (rtrays.rs) or the reflections (rtrefl.rs).

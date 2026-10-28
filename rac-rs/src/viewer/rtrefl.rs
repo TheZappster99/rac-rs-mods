@@ -1,15 +1,12 @@
-//! [PC] Ray-traced reflections (the built-in mod Ray-traced reflections, plugins.rs: Mods in the launcher, read at start-up;
-//! RAC_RT_REFLECTIONS=1 forces it on). No retail counterpart. RT_REFLECTIONS_PLAN.md has the plan and the phases.
+//! [PC] Ray-traced reflections (the Ray tracing built-in mod's Reflections, plugins.rs: Mods in the launcher, read at start-up;
+//! RAC_RT_REFLECTIONS=1 forces it on at Performance). No retail counterpart. RT_REFLECTIONS_PLAN.md has the plan and the phases.
 //!
-//! Phase 1 (this): the switch and its Quality setting only. With the mod on, the ray-tracing device and the level's structure
-//! (rtshadow.rs) come up as they do for the other ray-traced mods, so the cost of the structure alone can be measured
+//! Phase 1 (this): the switch and its quality only. With Reflections on, the ray-tracing device and the level's structure
+//! (rtshadow.rs) come up as they do for the other parts of the mod, so the cost of the structure alone can be measured
 //! (RAC_GPU_PASSES, passtime.rs) before anything traces a reflection. Nothing on screen changes yet.
 
-/// The built-in mod's id (plugins.rs).
-const ID: &str = "rt-reflections";
-
-/// The mod's Quality setting (plugins.rs `RtReflections::settings`, in the same order). Each level has a GPU time budget the
-/// reflection passes must stay under (RT_REFLECTIONS_PLAN.md): Performance 0.5 ms, Balanced 1.5 ms, Ultra 3.5 ms on an
+/// The Reflections setting's On values (plugins.rs `RayTracing::settings`, after Off, in the same order). Each has a GPU time
+/// budget the reflection passes must stay under (RT_REFLECTIONS_PLAN.md): Performance 0.5 ms, Balanced 1.5 ms, Ultra 3.5 ms on an
 /// RTX 3080 Ti at 1440p.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Quality {
@@ -21,21 +18,26 @@ pub(super) enum Quality {
 	Ultra,
 }
 
-/// The Ray-traced reflections built-in mod (read at start-up: the ray-tracing device feature is requested when the window opens).
-pub(super) fn wanted() -> bool {
-	crate::plugins::on_at_start(ID)
+/// The Reflections setting at start-up: 0 Off, 1.. the qualities.
+fn setting() -> u8 {
+	super::rtshadow::part("reflections", "RAC_RT_REFLECTIONS")
 }
 
-/// The Quality the game started with.
+/// Reflections are on (read at start-up: the ray-tracing device feature is requested when the window opens).
+pub(super) fn wanted() -> bool {
+	setting() > 0
+}
+
+/// The quality the game started with (Performance while Reflections are off).
 pub(super) fn quality() -> Quality {
-	match crate::plugins::value_at_start(ID, "quality") {
-		0 => Quality::Performance,
-		1 => Quality::Balanced,
+	match setting() {
+		0 | 1 => Quality::Performance,
+		2 => Quality::Balanced,
 		_ => Quality::Ultra,
 	}
 }
 
-/// After the device is made (rtshadow.rs `enable`): says in the run log whether the mod is on and at which quality.
+/// After the device is made (rtshadow.rs `enable`): says in the run log whether Reflections are on and at which quality.
 pub(super) fn announce(traces: bool) {
 	if !wanted() {
 		return;
