@@ -641,15 +641,23 @@ fn metal_mix() -> f32 {
 	}
 }
 
+/// How much of its mirror hit the wrench's steel head takes (`rt_wrench`): less than the chrome, as the PS2's wrench is painted
+/// steel, not a mirror.
+fn wrench_mix() -> f32 {
+	metal_mix() * 0.75
+}
+
 const RT_METAL: &str = r#"
-// [PC] Ray-traced reflections (rtrefl.rs `Metal`, Balanced and up): chrome and glass (the metal packets, NOV-35b) with the level
-// they mirror. `env` is the retail environment texel (the PS2's fake chrome / glass picture); one ray along the mirror of the
-// view at the fragment finds what the metal really faces: the static world shaded as `rt_hit_colour` (with the sun's shadow at
-// the hit), a moving thing by its texture's mean, both fogged over the ray's own length. The metal is drawn inside the level
-// pass, so the picture is not there to take hits from. A miss, and far hits, keep `env`; a hit takes RT_MIX of the texel.
-fn rt_metal(i: VOut, env: vec3<f32>) -> vec3<f32> {
+// [PC] Ray-traced reflections (rtrefl.rs `Metal`): 0 for the chrome and glass, 1 for the wrench's gloss (the pipelines' constant).
+override RT_GLOSS: f32 = 0.0;
+
+// [PC] Ray-traced reflections (rtrefl.rs `Metal`, Balanced and up): what the fragment's mirror ray sees, (colour, how much of it
+// holds; 0 for a miss). One ray along the mirror of the view finds what the surface really faces: the static world shaded as
+// `rt_hit_colour` (with the sun's shadow at the hit), a moving thing by its texture's mean, both fogged over the ray's own length.
+// The surface is drawn inside the level pass, so the picture is not there to take hits from. Far hits fade out.
+fn rt_metal_hit(i: VOut) -> vec4<f32> {
 	let ln = length(i.n);
-	if (ln < 1e-4) { return env; }
+	if (ln < 1e-4) { return vec4<f32>(0.0); }
 	var n = i.n / ln;
 	let to = i.w - u.eye.xyz;
 	let dist = length(to);
@@ -666,7 +674,7 @@ fn rt_metal(i: VOut, env: vec3<f32>) -> vec3<f32> {
 		}
 	}
 	let h = rayQueryGetCommittedIntersection(&rq);
-	if (h.kind == RAY_QUERY_INTERSECTION_NONE) { return rt_metal_shown(env, vec3<f32>(0.0, 0.2, 1.0)); }
+	if (h.kind == RAY_QUERY_INTERSECTION_NONE) { return vec4<f32>(0.0); }
 	var col: vec3<f32>;
 	if (h.instance_custom_data == 0u) {
 		// One pixel's footprint at the hit grows with the whole path (a curved mirror spreads it more; kept simple).
@@ -681,12 +689,39 @@ fn rt_metal(i: VOut, env: vec3<f32>) -> vec3<f32> {
 	}
 	// The level's fog over the ray's own length (the fragment's own fog over the eye's path is laid on after, as on any moby).
 	let f = clamp(u.fog.z + (h.t - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
-	col = mix(u.fog_colour.rgb, col, f);
-	let far = smoothstep(RT_REACH * 0.5, RT_REACH, h.t);
-	return rt_metal_shown(mix(env, col, RT_MIX * (1.0 - far)), vec3<f32>(1.0, 0.1, 0.0));
+	return vec4<f32>(mix(u.fog_colour.rgb, col, f), 1.0 - smoothstep(RT_REACH * 0.5, RT_REACH, h.t));
 }
 
-// RAC_RT_REFL_SHOW=1 (dev): the traced metal tinted as the water is: red where a hit was shaded, blue where nothing was hit.
+// Chrome and glass (the metal packets, NOV-35b): `env` is the retail environment texel (the PS2's fake chrome / glass picture); a
+// hit takes RT_MIX of it, a miss keeps it.
+fn rt_metal(i: VOut, env: vec3<f32>) -> vec3<f32> {
+	let h = rt_metal_hit(i);
+	if (h.a <= 0.0) { return rt_metal_shown(env, vec3<f32>(0.0, 0.2, 1.0)); }
+	return rt_metal_shown(mix(env, h.rgb, RT_MIX * h.a), vec3<f32>(1.0, 0.1, 0.0));
+}
+
+// [PC] The held wrench's head (not retail: a plain textured moby there, class 71, rtrefl.rs `Metal`): where its texel is bright
+// and grey (the steel, not the handle's colour or the dark grip) it takes RT_WRENCH of its mirror hit, tinted a little by the
+// texel so the steel keeps its shade. Elsewhere nothing is traced.
+fn rt_wrench(i: VOut, c: vec3<f32>) -> vec3<f32> {
+	let hi = max(c.r, max(c.g, c.b));
+	let sat = (hi - min(c.r, min(c.g, c.b))) / max(hi, 1e-3);
+	let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+	let steel = smoothstep(0.2, 0.45, lum) * (1.0 - smoothstep(0.12, 0.3, sat));
+	if (steel < 0.02) { return c; }
+	let h = rt_metal_hit(i);
+	if (h.a <= 0.0) { return rt_metal_shown(c, vec3<f32>(0.0, 0.2, 1.0) * steel + c * (1.0 - steel)); }
+	let tinted = h.rgb * mix(vec3<f32>(1.0), c / max(lum, 0.05), 0.35);
+	return rt_metal_shown(mix(c, tinted, RT_WRENCH * steel * h.a), vec3<f32>(1.0, 0.1, 0.0) * steel + c * (1.0 - steel));
+}
+
+// The texel of a surface the metal module draws: the chrome and glass, or the wrench (RT_GLOSS).
+fn rt_surface(i: VOut, c: vec3<f32>) -> vec3<f32> {
+	if (RT_GLOSS > 0.5) { return rt_wrench(i, c); }
+	return rt_metal(i, c);
+}
+
+// RAC_RT_REFL_SHOW=1 (dev): the traced surfaces tinted as the water is: red where a hit was shaded, blue where nothing was hit.
 fn rt_metal_shown(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
 	return mix(c, tint, RT_SHOW * 0.7);
 }
@@ -696,7 +731,7 @@ fn rt_metal_shown(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
 /// and what they become in the metal module (the texel's colour through `rt_metal`).
 const METAL_HOOKS: [(&str, &str); 2] = [
 	("\tif (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }\n\tif (c.a < 0.25) { discard; }\n", "\tif (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }\n\tif (c.a < 0.25) { discard; }\n\tc = vec4<f32>(rt_metal(i, c.rgb), c.a);\n"),
-	("\tlet c = moby_texel(i);\n\tvar rgb = c.rgb * i.c.rgb * sun_lit(i);\n", "\tlet c = moby_texel(i);\n\tvar rgb = rt_metal(i, c.rgb) * i.c.rgb * sun_lit(i);\n"),
+	("\tlet c = moby_texel(i);\n\tvar rgb = c.rgb * i.c.rgb * sun_lit(i);\n", "\tlet c = moby_texel(i);\n\tvar rgb = rt_surface(i, c.rgb) * i.c.rgb * sun_lit(i);\n"),
 ];
 
 /// The level shader `src` (as the device runs it, rtshadow.rs `level`) for the metal faces: `rt_metal` on their texel. The level's
@@ -714,6 +749,7 @@ fn metal_shader(src: &str, height: f32) -> String {
 		.replace("RT_REACH", &format!("{:.1}", reach()))
 		.replace("RT_SHOW", flag(show()))
 		.replace("RT_MIX", &format!("{:.3}", metal_mix()))
+		.replace("RT_WRENCH", &format!("{:.3}", wrench_mix()))
 		.replace("RT_HEIGHT", &format!("{:.1}", height.max(1.0)))
 		.replace("RT_STRENGTH", &format!("{:.3}", super::sunshadow::STRENGTH));
 	// The shadow receivers' level shader already has the structure, the alpha tables and the ray code (rtshadow.rs `shader`).
@@ -746,6 +782,8 @@ pub(super) struct MetalPipelines {
 	pub opaque: [wgpu::RenderPipeline; 3],
 	/// The ABE pass's states (as `moby_pipelines`).
 	pub blend: [wgpu::RenderPipeline; 2],
+	/// The held wrench's opaque draws (`rt_wrench`; the opaque states, as `opaque`).
+	pub gloss: [wgpu::RenderPipeline; 3],
 }
 
 impl Metal {
@@ -769,7 +807,7 @@ impl Metal {
 
 	fn make(&self, device: &wgpu::Device) -> MetalPipelines {
 		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl metal"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl metal", metal_shader(&self.src, self.height).into())) });
-		let make = |fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>| {
+		let make = |fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>, gloss: f64| {
 			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 				label: Some("metal rt"),
 				layout: Some(&self.pl),
@@ -783,7 +821,7 @@ impl Metal {
 						attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3, 3 => Float32x4, 4 => Float32x4],
 					})],
 				},
-				fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(fs), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: self.format, blend, write_mask: wgpu::ColorWrites::ALL })] }),
+				fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(fs), compilation_options: wgpu::PipelineCompilationOptions { constants: &[("RT_GLOSS", gloss)], ..Default::default() }, targets: &[Some(wgpu::ColorTargetState { format: self.format, blend, write_mask: wgpu::ColorWrites::ALL })] }),
 				primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
 				depth_stencil: Some(wgpu::DepthStencilState { format: self.depth, depth_write_enabled: Some(depth_write), depth_compare: Some(compare), stencil: Default::default(), bias: Default::default() }),
 				multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
@@ -792,11 +830,13 @@ impl Metal {
 			})
 		};
 		let z = super::gs_state::ztest();
-		let opaque = [None, Some(wgpu::Face::Back), Some(wgpu::Face::Front)].map(|c| make("fs", None, true, z, c));
+		let culls = [None, Some(wgpu::Face::Back), Some(wgpu::Face::Front)];
+		let opaque = culls.map(|c| make("fs", None, true, z, c, 0.0));
 		let ab = Some(wgpu::BlendState::ALPHA_BLENDING);
-		let blend = [make("fs_moby_a", ab, true, wgpu::CompareFunction::LessEqual, None), make("fs_moby_b", ab, false, wgpu::CompareFunction::LessEqual, None)];
-		eprintln!("rt reflections: chrome and glass traced ({:.0}% over the env texture, reach {:.0})", metal_mix() * 100.0, reach());
-		MetalPipelines { opaque, blend }
+		let blend = [make("fs_moby_a", ab, true, wgpu::CompareFunction::LessEqual, None, 0.0), make("fs_moby_b", ab, false, wgpu::CompareFunction::LessEqual, None, 0.0)];
+		let gloss = culls.map(|c| make("fs", None, true, z, c, 1.0));
+		eprintln!("rt reflections: chrome and glass traced ({:.0}% over the env texture, the wrench's steel {:.0}%, reach {:.0})", metal_mix() * 100.0, wrench_mix() * 100.0, reach());
+		MetalPipelines { opaque, blend, gloss }
 	}
 
 	/// Group 2 for the level's structure `rt`, or None until it has hit data (the metal then draws as before).

@@ -56,6 +56,9 @@ impl Gpu {
 			let clipped = (scene.props_shown && !warp && !scene.clip_batch.draws.is_empty()).then_some(&scene.clip_batch);
 			let skinned = scene.props_sj.as_ref().map(|sj| (&self.props_gpu, sj));
 			let array = self.bindless.as_ref().zip(scene.tex_array.as_ref());
+			// [PC] Ray-traced reflections (rtrefl.rs `Metal`): the chrome and glass, and the held wrench's steel, trace once the level's
+			// structure has hit data.
+			let metal_rt = self.sun.rt_metal.as_ref().zip(self.sun.rt.as_ref()).zip(scene.tex_array.as_ref()).and_then(|((m, rt), a)| Some((m.pipelines(&self.device)?, m.group(&self.device, rt)?, a)));
 			// BRIDGE-64a: with volumes this frame the deferred-list slots leave the opaque props draws for the redraw after them.
 			// M3a shadows: in retail mode a frame whose only deferred caster is the hero still draws its volumes.
 			// [PC] Dynamic shadows replace the retail shadow volumes (no double shadows).
@@ -114,21 +117,25 @@ impl Gpu {
 				// (`moby_word`); the world and tfrag batches keep theirs (the tfrag pass reads its own word from it).
 				let moby_pass = matches!(bi, 3 | 4 | 5 | 6);
 				for d in draws {
-					if d.cull != 0 {
+					// The hero batch's held wrench (its own textures) takes its steel's gloss.
+					let gloss = metal_rt.as_ref().filter(|_| bi == 3 && self.wrench_gloss.contains(&d.texture));
+					if let Some((mp, g, a)) = gloss {
+						pass.set_bind_group(2, g, &[]);
+						pass.set_bind_group(3, *a, &[]);
+						pass.set_pipeline(&mp.gloss[d.cull as usize]);
+					} else if d.cull != 0 {
 						pass.set_pipeline(&cull[d.cull as usize - 1]);
 					}
 					pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
 					let inst = if moby_pass { moby_inst(d) } else { d.inst };
 					pass.draw_indexed(d.start..d.start + d.count, 0, inst..inst + 1);
-					if d.cull != 0 {
+					if d.cull != 0 || gloss.is_some() {
 						pass.set_pipeline(pipeline);
 					}
 				}
 			}
 			// BRIDGE-45 (NOV-35b): the props' metal faces (chrome / glass, clamp sampler) after the LOD batches.
 			let metal = self.metal.props.as_ref().zip(self.metal.tex.as_ref()).filter(|_| scene.props_shown && !warp);
-			// [PC] Ray-traced reflections (rtrefl.rs `Metal`): the chrome and glass trace once the level's structure has hit data.
-			let metal_rt = self.sun.rt_metal.as_ref().zip(self.sun.rt.as_ref()).zip(scene.tex_array.as_ref()).and_then(|((m, rt), a)| Some((m.pipelines(&self.device)?, m.group(&self.device, rt)?, a)));
 			self.pass_pools(&mut pass, warp, metal, metal_rt.as_ref(), water_on, wrec);
 			self.pass_shrubs(&mut pass, scene, warp, array, multi);
 			// BRIDGE-64a: the shadow volumes and the darken, then the deferred-list slots drawn opaque over them.

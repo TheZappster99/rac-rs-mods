@@ -1271,6 +1271,8 @@ struct Gpu {
 	panel_posed: Option<u32>,
 	/// BRIDGE-45: the metal packets, textures and this frame's metal batch.
 	metal: MetalDraw,
+	/// [PC] Ray-traced reflections (rtrefl.rs `Metal`): the hero batch's texture slots only the held wrench uses (`set_wrench_gloss`).
+	wrench_gloss: Vec<usize>,
 	/// [PC] perf round 3: the props pipelines and storage buffers of the vertex-shader posing .
 	props_gpu: gpuskin::PropsGpu,
 	/// [PC] perf round 3 (bindless.rs): the texture-array pipelines of the tie and shrub draws (None: per-draw bind groups), and

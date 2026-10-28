@@ -31,6 +31,20 @@ impl Gpu {
 		[pair(0), pair(1), third]
 	}
 
+	/// [PC] Ray-traced reflections (rtrefl.rs `Metal`): after `load_scene`, the texture slots of the hero batch that only the held
+	/// wrench draws with (`wrench` its faces' texture keys, `hero` Ratchet's own): their draws take the wrench's gloss.
+	pub(in crate::viewer) fn set_wrench_gloss(&mut self, wrench: &[u32], hero: &[u32]) {
+		let Some(scene) = &self.scene else { return };
+		let own = |k: &u32| !hero.iter().any(|h| h & crate::mobies::SLOT_MASK == k & crate::mobies::SLOT_MASK);
+		let mut slots: Vec<usize> = wrench.iter().filter(|k| own(k)).filter_map(|k| scene.tex_slots.get(&(k & crate::mobies::SLOT_MASK)).copied()).collect();
+		slots.sort_unstable();
+		slots.dedup();
+		if self.sun.rt_metal.is_some() {
+			eprintln!("rt reflections: the wrench's steel on {} texture slots ({} of its keys shared with Ratchet)", slots.len(), wrench.iter().filter(|k| !own(k)).count());
+		}
+		self.wrench_gloss = slots;
+	}
+
 	/// BRIDGE-45 (NOV-35b): `load_scene`'s metal half: every class's metal packets and the chrome / glass textures (`CHROME_KEY`,
 	/// `GLASS_KEY` in `textures`), uploaded with the clamp sampler (CLAMP_1 = 5, TEX1 MMAG linear; FUN_00253c78 OV:44617-44620).
 	pub(in crate::viewer) fn load_metal(&mut self, classes: HashMap<u32, Vec<mobies::MetalPacket>>, textures: &HashMap<u32, Texture>) {

@@ -1489,6 +1489,8 @@ crate::loadlog::say(|| "host: pre gpu.load_scene".into());
 					None => gpu.load_scene(&meshes, &shrub_set, &tie_set, &textures, sky.as_ref(), hero, hero_anim.as_ref().and_then(|h| mobies::glow_rgb(h.0.glow).map(|c| (c, h.0.colour_start, h.0.mesh.positions.len()))), &order, &prop_meshes, &previews, occ, tfrags, tfrag_b, &terrain_chains.0, &terrain_chains.1, &terrain_chains.2),
 				}
 crate::loadlog::say(|| "host: load_scene returned".into());
+				// [PC] Ray-traced reflections (rtrefl.rs): the held wrench's own textures, for its steel's gloss.
+				gpu.set_wrench_gloss(&wrench.as_ref().map_or(Vec::new(), |w| w.0.faces.iter().map(|f| f.0).collect::<Vec<u32>>()), &hero_anim.as_ref().map_or(Vec::new(), |h| h.0.mesh.faces.iter().map(|f| f.0 as u32).collect::<Vec<u32>>()));
 				gpu.set_shrub_bb_textures(&bb_tex);
 				// [PC] PREVIEW (vegfx.rs, RAC_VEG): where the extra plants go.
 				crate::texpack::extra_grass::apply(self.level, &mut textures, &mut terrain_chains); gpu.plan_veg(&world, &instances, &shrub_set, &textures, &terrain_chains.0, &terrain_chains.1, &prop_meshes, &tie_set, &terrain_chains.2, self.level);

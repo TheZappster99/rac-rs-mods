@@ -12,8 +12,9 @@ Phase 5 (Balanced) checked in game on Pokitaru, Gaspar lava and Orxon sludge: `w
 cut-off at the end of a Gaspar lava pool by a pillar shows at Performance too (no traced lava there): not the reflections.
 Phase 6 (chrome and glass) built (rtrefl.rs `Metal`): the game starts at Balanced with the traced metal pipelines (log: "chrome
 and glass traced"); looked at in game at Ultra and switched live with Insert (looks good), not yet timed. It has no pass of its own to time (the metal draws inside the level
-pass), so its cost is the level pass's time with and without it. Then: the wrench head (a request, not retail: it is a plain
-textured moby, class 71), traced as the chrome is from Balanced on.
+pass), so its cost is the level pass's time with and without it. The wrench head (a request, not retail: a plain textured moby,
+class 71) is built too: the hero batch's draws with the wrench's own textures (`Gpu::set_wrench_gloss`) use the metal module with
+RT_GLOSS = 1 (`rt_wrench`): bright grey texels take 75% of the chrome's share of their mirror hit. Looked at in game (looks good; Clank shines too, likely a texture he shares with the wrench). Later: a sun glint on the metal where the mirror ray misses and points at the sun.
 
 The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
 (2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics
