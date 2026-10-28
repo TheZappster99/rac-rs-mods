@@ -51,7 +51,10 @@ const HURT_STATES: [u32; 2] = [0x16, 0x3c];
 const LEDGE_GROUP: u32 = 3;
 /// Game modes that only pause the ragdoll (a menu, the map): everything else but gameplay (0) ends it.
 const MENU_MODES: [u32; 2] = [1, 3];
-const GETUP_S: f32 = 0.6;
+/// The get-up: long enough for the renderer's get-up clip (viewer/ragdoll.rs `GetUp`: settle into the clip's first pose, play it,
+/// settle into the game's pose). The free get-up after `EDGE_FALL_STATES` is the quick plain blend: the pad is his then.
+const GETUP_S: f32 = 1.4;
+const GETUP_FREE_S: f32 = 0.6;
 /// The hit reaction (an enemy hit; RAGDOLL_PLAN.md "Hero states").
 const HIT_STATE: u32 = 0x16;
 const LAVA_STATE: u32 = 0x3c;
@@ -62,6 +65,16 @@ const HIT_COOL: u32 = 20;
 /// The game's Ratchet falling (plain fall, tumble): after a hit this is a knock-back off a ledge, and with the pad locked he
 /// fell into the pit every time (logs 2026-10-26). The ragdoll then gets up at once and the pad is his again, so he can steer.
 const EDGE_FALL_STATES: [u32; 2] = [0x6, 0x77];
+/// Knockdown guard (setting `guard`): small enemies in a group hit him again and again while he lay there, each hit started the
+/// limp time again, and he never got up before he died (player, 2026-10-27). With the guard a hit while limp still throws the
+/// body but does not start the limp time again, and no hit knocks him down during the get-up or for this long after it (retail's
+/// hit still lands: he loses health and is knocked back as usual, with the pad his). 3 s: the hits in that log came 2.5 to 3.3 s
+/// apart, so a 2 s guard ended before the next one.
+const GUARD_S: f32 = 3.0;
+/// With the guard, a knockdown by a hit lies only this long (the Limp time setting is for falls), and the pad is his again as
+/// soon as the get-up starts. Second test (2026-10-27): hits came every 1.7 s against his 4 health, so the 3 s locked down took
+/// two of them and he got up with 1 health; the player chose control during the get-up over a locked get-up.
+const HIT_LIMP_S: f32 = 0.5;
 
 /// States that end a ragdoll at once: water, mud, the Swingshot, the ship / turret and the grind.
 fn cancel_state(s: u32) -> bool {
@@ -103,6 +116,8 @@ pub struct Cue {
 	/// The ragdoll started from a hit: the body starts at rest. The drawn pose jumps into retail's hit reaction that field, and
 	/// the body read that jump as a launch of 10-12 units/s up on top of the push (logs 2026-10-26: pelvis 4.5 above him).
 	pub from_hit: bool,
+	/// The quick get-up with the pad free (`EDGE_FALL_STATES`): the renderer blends straight to the game's pose, no clip.
+	pub free: bool,
 	/// Counts the fields the worker ran the mod for (not the menus): the renderer steps the body once per new value. Its own field
 	/// count runs on in the pause menu, where this cue is not renewed, and the body went on falling and settling behind the menu.
 	pub tick: u32,
@@ -136,6 +151,8 @@ struct Mod {
 	/// A hit being measured: fields since it, his position at it.
 	hit: Option<(u32, [f32; 3])>,
 	hit_cool: u32,
+	/// Knockdown guard: fields left in which a hit cannot knock him down (`GUARD_S` after a get-up).
+	guard: u32,
 	push_id: u32,
 	push: Option<(u32, [f32; 3])>,
 	from_hit: bool,
@@ -144,6 +161,9 @@ struct Mod {
 	phase: Phase,
 	/// Fields in the phase.
 	t: u32,
+	/// Fields this ragdoll has lain on the ground (the limp time). Not `t`: a hit's knock-back lifts the game's Ratchet off the
+	/// ground for a moment, Ground -> Fall -> Ground, and restarting the count there kept him down under every hit, guard or not.
+	down: u32,
 	id: u32,
 	cue: Cue,
 }
@@ -175,11 +195,13 @@ pub fn pre_field(m: &mut Machine) {
 	let dt = super::disc::field_dt();
 	let height = [6.0, 8.0, 12.0][setting("height").min(2) as usize];
 	let button = setting("button") == 1;
-	let limp = ([1.5, 3.0, 5.0][setting("time").min(2) as usize] / dt).round() as u32;
-	let getup = (GETUP_S / dt).round() as u32;
+	// Limp time: halved on 2026-10-27 (was 1.5 / 3 / 5 s) once the get-up clips came in: the player wanted him up sooner.
+	let limp = ([0.75, 1.5, 2.5][setting("time").min(2) as usize] / dt).round() as u32;
+	let getup = |free: bool| ((if free { GETUP_FREE_S } else { GETUP_S }) / dt).round() as u32;
 	let flop = setting("flop").min(2);
 	let bounce = setting("bounce").min(2);
 	let hits = setting("hits") == 1;
+	let guard = setting("guard") == 1;
 
 	let mut g = MOD.lock().unwrap();
 	let s = g.get_or_insert_with(Mod::default);
@@ -211,7 +233,13 @@ pub fn pre_field(m: &mut Machine) {
 	let hit = hits
 		&& s.hit_cool == 0
 		&& ((state == HIT_STATE && s.last_state != HIT_STATE) || (health < s.last_health && state != LAVA_STATE));
+	let shielded = guard && (s.guard > 0 || s.phase == Phase::GetUp);
+	if hit && shielded && log_on() {
+		eprintln!("ragdoll: hit guarded (state {state:#x}, health {health}) in {:?}", s.phase);
+	}
+	let hit = hit && !shielded;
 	s.hit_cool = s.hit_cool.saturating_sub(1);
+	s.guard = s.guard.saturating_sub(1);
 	s.last_state = state;
 	s.last_health = health;
 	if mode != 0 || form != 0 || health <= 0 || teleport || cancel_state(state) {
@@ -231,9 +259,12 @@ pub fn pre_field(m: &mut Machine) {
 				s.impact = None;
 				s.from_hit = true;
 			}
-			Phase::Ground => restart = true,
-			Phase::GetUp => s.phase = Phase::Ground,
-			Phase::Fall => {}
+			Phase::Ground => restart = !guard,
+			Phase::GetUp => {
+				s.phase = Phase::Ground;
+				restart = true;
+			}
+			Phase::Fall => restart = !guard,
 		}
 		if log_on() {
 			eprintln!("ragdoll: hit (state {state:#x}, health {health}, airborne {}) in {:?}", airborne as u8, old);
@@ -284,12 +315,12 @@ pub fn pre_field(m: &mut Machine) {
 				if airborne {
 					// Slid off a ledge while limp: limp in the air again.
 					s.phase = Phase::Fall;
-				} else if s.t >= limp {
+				} else if s.down >= if guard && s.from_hit { (HIT_LIMP_S / dt).round() as u32 } else { limp } {
 					s.phase = Phase::GetUp;
 				}
 			}
 			Phase::GetUp => {
-				if s.t >= getup {
+				if s.t >= getup(s.free) {
 					s.phase = Phase::Off;
 				}
 			}
@@ -313,20 +344,31 @@ pub fn pre_field(m: &mut Machine) {
 	}
 	if restart {
 		s.t = 0;
+		s.down = 0;
 	}
 	if s.phase != old {
 		s.t = 0;
+		if old == Phase::Off {
+			s.down = 0;
+		}
+		if old == Phase::GetUp && s.phase == Phase::Off {
+			s.guard = (GUARD_S / dt).round() as u32;
+		}
 		if log_on() {
 			eprintln!("ragdoll: phase {old:?} -> {:?} (id {}, state {state:#x}, mode {mode}, z {z:.2})", s.phase, s.id);
 		}
 	}
 	s.t += 1;
-	if s.phase != Phase::Off && !s.free {
+	if s.phase == Phase::Ground {
+		s.down += 1;
+	}
+	let hit_getup = guard && s.from_hit && s.phase == Phase::GetUp;
+	if s.phase != Phase::Off && !s.free && !hit_getup {
 		// Only Start (pause) and the camera stick reach the game while he is limp.
 		m.set_pad(s.buttons & PAD_START, [s.sticks[0], s.sticks[1], 0x80, 0x80]);
 	}
-	let blend = if s.phase == Phase::GetUp { (s.t as f32 / getup.max(1) as f32).min(1.0) } else { 0.0 };
-	s.cue = Cue { id: s.id, phase: s.phase, blend, frozen: false, flop, bounce, impact: s.impact, push: s.push, from_hit: s.from_hit, tick: s.tick };
+	let blend = if s.phase == Phase::GetUp { (s.t as f32 / getup(s.free).max(1) as f32).min(1.0) } else { 0.0 };
+	s.cue = Cue { id: s.id, phase: s.phase, blend, frozen: false, flop, bounce, impact: s.impact, push: s.push, from_hit: s.from_hit, free: s.free, tick: s.tick };
 }
 
 // ---- the measuring tools ----------------------------------------------------------------------------------------------------
@@ -538,6 +580,47 @@ pub fn dump_skeleton(level: usize, class: &crate::mobies::MobyClass, a: &crate::
 		}
 		let path: Vec<String> = path.iter().rev().map(|j| j.to_string()).collect();
 		eprintln!("ragdoll: chain {}", path.join(" > "));
+	}
+	dump_clips(a);
+}
+
+/// `seq` lines of the dump (phase 5, the get-up clip): every hero sequence sampled at 0, 1/4, 1/2, 3/4 and the end of one loop,
+/// with the pelvis position and how far the head stands above the pelvis (about 0.6 standing, near 0 lying). A get-up clip
+/// starts low and ends standing; `lying` marks the sequences that start with the head under 0.25 above the pelvis.
+fn dump_clips(a: &crate::anim::Animated) {
+	let n = a.skeleton.parents.len();
+	if n <= 8 {
+		return;
+	}
+	for (i, s) in a.sequences.iter().enumerate().filter(|(_, s)| !s.frames.is_empty()) {
+		let total = s.tick_len().max(1.0);
+		let mut parts = Vec::new();
+		let mut ups = Vec::new();
+		for k in 0..5 {
+			let t = (total * k as f32 / 4.0).min(total - 0.01);
+			let mats = a.pose_after(i, t);
+			let w = |j: usize| {
+				let m = a.joint_world(&mats, j);
+				[m[3], m[7], m[11]]
+			};
+			let (pelvis, head) = (w(1), w(8));
+			let up = head[2] - pelvis[2];
+			ups.push(up);
+			parts.push(format!("{:.2} {:.2} {:.2} up {up:.2}", pelvis[0], pelvis[1], pelvis[2]));
+		}
+		let tag = if ups[0] < 0.25 && ups[4] > 0.45 { " lying -> standing" } else if ups[0] < 0.25 { " lying" } else { "" };
+		eprintln!("ragdoll: seq {i} frames {} ticks {total:.0} | {}{tag}", s.frames.len(), parts.join(" | "));
+		// The clips that go down to the ground somewhere: every frame, to find a stretch from lying to standing. `fwd` is the
+		// height of the pelvis's forward axis (model x): -1 face down, +1 face up.
+		if ups.iter().any(|u| *u < 0.15) {
+			let frames: Vec<String> = s.frames.iter().map(|f| {
+				let mats = a.pose_single(f);
+				let pm = a.joint_world(&mats, 1);
+				let hm = a.joint_world(&mats, 8);
+				format!("{:.2}/{:.2}/{:+.1}", hm[11] - pm[11], pm[11], pm[8])
+			}).collect();
+			eprintln!("ragdoll: seq {i} frames up/pelvis/fwd {}", frames.join(" "));
+		}
 	}
 }
 

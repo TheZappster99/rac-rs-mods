@@ -94,11 +94,18 @@ struct Tune {
 	hitlift: f32,
 	/// The pelvis's leash after a hit (units, instead of `TETHER_MAX`): the push throws the body further than retail throws him.
 	hitleash: f32,
+	/// The get-up clips' frame ranges (first, last; last < first plays it backwards): face down `crouch` (seq `CROUCH_SEQ`),
+	/// face up `kipup` (seq `KIPUP_SEQ`).
+	crouch: [f32; 2],
+	kipup: [f32; 2],
+	/// Where the clip starts and ends in the get-up (shares of `Cue::blend`): before it the limp pose settles into the clip's
+	/// first frame, after it the clip's last frame settles into the game's pose.
+	getup: [f32; 2],
 }
 
 /// Defaults. Second round (2026-10-26, "a bit spastic when hitting the ground"): more damping, a firmer drive and narrower
 /// Loose limits than the first (damp 0.4, adamp 1.5, drive 0.05 / 0.5, limits 0.6 / 1.0 / 1.6, 8 substeps).
-const TUNE: Tune = Tune { gravity: 24.0, substeps: 10, damp: 0.8, adamp: 4.0, friction: 0.3, drive: [0.02, 0.2], limits: [0.6, 0.85, 1.4], tether: 2.0, bounce: [0.0, 0.35, 0.6], hitpush: 2.5, hitlift: 5.0, hitleash: 6.0 };
+const TUNE: Tune = Tune { gravity: 24.0, substeps: 10, damp: 0.8, adamp: 4.0, friction: 0.3, drive: [0.02, 0.2], limits: [0.6, 0.85, 1.4], tether: 2.0, bounce: [0.0, 0.35, 0.6], hitpush: 2.5, hitlift: 5.0, hitleash: 6.0, crouch: [5.0, 14.0], kipup: [14.0, 0.0], getup: [0.25, 0.85] };
 
 /// See `capsule_ii`.
 const INERTIA: f32 = 2.5;
@@ -151,6 +158,68 @@ const CAM_DZ: f32 = 1.5;
 const EDGE_DEPTH: f32 = 2.0;
 const EDGE_BACK: f32 = 1.0;
 const DROP_MAX: f32 = 3.0;
+/// The get-up clips (RAGDOLL_PLAN.md "Phase 5 clip search": no retail clip goes from lying to standing). Face down: seq 12's rise
+/// out of a deep forward hunch. Face up: seq 97, a backflip that ends on his back, played backwards: a flip from his back onto his
+/// feet. A clip whose first frame is not low (head more than `CLIP_LOW` above the pelvis) or whose last is not standing (less
+/// than `CLIP_STAND`) is not used, in case another disc numbers the hero's sequences differently.
+const CROUCH_SEQ: usize = 12;
+const KIPUP_SEQ: usize = 97;
+const CLIP_LOW: f32 = 0.3;
+const CLIP_STAND: f32 = 0.45;
+/// The limp body gets up with a clip when its head is less than this above its pelvis (units; about 0.55 standing).
+const LYING_UP: f32 = 0.3;
+/// Without a clip (he is not lying down) the plain blend takes this share of the get-up, about the 0.6 s it had before the clips.
+const PLAIN_SHARE: f32 = 0.45;
+
+/// A get-up clip, planned when the get-up starts. The clip plays where the body lies, turned to lie the way the body lies, and
+/// slides and turns onto the game's Ratchet while it plays (a thrown body lies up to `hitleash` away from him).
+struct GetUp {
+	/// The clip's frames in play order: every joint's frame in the clip's model space.
+	frames: Vec<Vec<M34>>,
+	/// Where the clip starts: its model origin in the world and its turn about z from the game's Ratchet's heading.
+	at: V3,
+	turn: f32,
+}
+
+impl GetUp {
+	/// The clip's place at slide `k` (0 = where the body lies, 1 = the game's Ratchet).
+	fn place_at(&self, place: Place, k: f32) -> Place {
+		let turn = self.turn * (1.0 - k);
+		Place { pos: add(self.at, scale(sub(place.pos, self.at), k)), rows: place.rows.map(|r| rot_z(turn, r)) }
+	}
+
+	/// The clip's joints at progress `u` (0..1), between its two nearest frames.
+	fn clip(&self, u: f32) -> Vec<M34> {
+		let x = u.clamp(0.0, 1.0) * (self.frames.len() - 1) as f32;
+		let i = (x as usize).min(self.frames.len() - 2);
+		self.frames[i].iter().zip(&self.frames[i + 1]).map(|(a, b)| blend34(a, b, x - i as f32)).collect()
+	}
+
+	/// How far the get-up has moved onto the game's Ratchet (the camera follow fades out by it).
+	fn slide(&self, blend: f32, t: &Tune) -> f32 {
+		let [g0, g1] = t.getup;
+		smoothstep((blend - g0) / (g1 - g0).max(1e-3))
+	}
+
+	/// The drawn joints (model space of the game's Ratchet): the limp pose settling into the clip's first frame, the clip, then its
+	/// last frame settling into the game's pose.
+	fn pose(&self, limp: &[M34], anim: &[M34], place: Place, blend: f32, t: &Tune) -> Vec<M34> {
+		let [g0, g1] = t.getup;
+		let placed = |fr: &[M34], at: Place| fr.iter().map(|m| place.to_model(&at.to_world(m))).collect::<Vec<M34>>();
+		if blend < g0 {
+			let s = smoothstep(blend / g0);
+			let first = placed(&self.frames[0], self.place_at(place, 0.0));
+			limp.iter().zip(&first).map(|(a, b)| blend34(a, b, s)).collect()
+		} else if blend < g1 {
+			let u = (blend - g0) / (g1 - g0).max(1e-3);
+			placed(&self.clip(u), self.place_at(place, smoothstep(u)))
+		} else {
+			let s = smoothstep((blend - g1) / (1.0 - g1).max(1e-3));
+			let last = placed(self.frames.last().unwrap(), place);
+			last.iter().zip(anim).map(|(a, b)| blend34(a, b, s)).collect()
+		}
+	}
+}
 
 fn tune() -> Tune {
 	static CACHE: std::sync::Mutex<Option<(std::time::Instant, Tune)>> = std::sync::Mutex::new(None);
@@ -179,6 +248,9 @@ fn tune() -> Tune {
 			"hitpush" => t.hitpush = x,
 			"hitlift" => t.hitlift = x,
 			"hitleash" => t.hitleash = x,
+			"crouch" if v.len() >= 2 => t.crouch = [v[0], v[1]],
+			"kipup" if v.len() >= 2 => t.kipup = [v[0], v[1]],
+			"getup" if v.len() >= 2 => t.getup = [v[0].clamp(0.0, 1.0), v[1].clamp(v[0], 1.0)],
 			_ => {}
 		}
 	}
@@ -288,6 +360,11 @@ pub(super) struct Ragdoll {
 	cam: [V3; 2],
 	/// The body's pelvis, last field's and this field's, while the camera follows it (None: not limp or the setting is off).
 	cam_body: Option<[V3; 2]>,
+	/// The get-up clip (None: the plain blend) and whether this get-up was planned yet. While a clip plays the body is not stepped.
+	getup: Option<GetUp>,
+	getup_planned: bool,
+	/// The joints drawn last (model space): a hit during a get-up clip starts the body again from them.
+	last_out: Vec<M34>,
 }
 
 impl Ragdoll {
@@ -311,6 +388,8 @@ impl Ragdoll {
 		self.last_field = Some(field);
 		if cue.phase == Phase::Off {
 			self.active = false;
+			self.getup = None;
+			self.getup_planned = false;
 			if ticked {
 				// Only the bodies' joints: the start motion of a ragdoll that may begin next field.
 				let mut anim = vec![[0.0f32; 12]; HERO_JOINTS];
@@ -327,7 +406,7 @@ impl Ragdoll {
 		let anim: Vec<M34> = (0..HERO_JOINTS).map(|j| a.joint_world(mats, j)).collect();
 		if !self.active || cue.id != self.id {
 			self.start(&anim, place, field, cue);
-		} else if ticked && !cue.frozen {
+		} else if ticked && !cue.frozen && self.getup.is_none() {
 			let dt = crate::retail::disc::field_dt();
 			let t0 = std::time::Instant::now();
 			for _ in 0..steps {
@@ -348,6 +427,20 @@ impl Ragdoll {
 				LIMP_LOG.store(true, std::sync::atomic::Ordering::Relaxed);
 			}
 		}
+		if cue.phase == Phase::GetUp {
+			if !self.getup_planned {
+				self.getup_planned = true;
+				self.getup = self.plan_getup(a, place, cue);
+			}
+		} else if self.getup_planned {
+			// A hit during the get-up (back to Ground): the body starts again, at rest, from the pose drawn last; the push follows.
+			if self.getup.take().is_some() && self.last_out.len() == HERO_JOINTS {
+				let (thrown, last) = (self.thrown, std::mem::take(&mut self.last_out));
+				self.start(&last, place, field, Cue { from_hit: true, impact: None, ..cue });
+				self.thrown = thrown;
+			}
+			self.getup_planned = false;
+		}
 		if let Some((pid, v)) = cue.push {
 			if self.push_seen != Some(pid) {
 				self.push_seen = Some(pid);
@@ -359,7 +452,10 @@ impl Ragdoll {
 		if ticked {
 			// The camera eases toward the body (less of it while he gets up), measured between the body's pelvis and the game's.
 			let on = crate::plugins::value_at_start(crate::retail::ragdoll::ID, "camera") == 1;
-			let s = if cue.phase == Phase::GetUp { smoothstep(cue.blend) } else { 0.0 };
+			let s = match &self.getup {
+				Some(g) if cue.phase == Phase::GetUp => g.slide(cue.blend, &tune()),
+				_ => plain_blend(cue),
+			};
 			let d = sub(self.bodies[0].x, self.frames(&anim, place)[0].0);
 			let d = [d[0], d[1], d[2].clamp(-CAM_DZ / CAM_Z, CAM_DZ / CAM_Z)];
 			let pelvis = self.bodies[0].x;
@@ -482,6 +578,10 @@ impl Ragdoll {
 				(j, i, mul34(&inv34(&frame(b.x, b.q)), &world_of(j)))
 			})
 			.collect();
+		if cue.id != self.id {
+			self.getup = None;
+			self.getup_planned = false;
+		}
 		self.id = cue.id;
 		self.flop = cue.flop;
 		self.active = true;
@@ -738,9 +838,21 @@ impl Ragdoll {
 		ids
 	}
 
-	/// Writes the ragdoll's pose into `mats` (blended toward the animation while he gets up).
-	fn pose(&self, mats: &mut [M34], anim: &[M34], a: &crate::anim::Animated, place: Place, cue: Cue) {
-		let s = if cue.phase == Phase::GetUp { smoothstep(cue.blend) } else { 0.0 };
+	/// Writes the ragdoll's pose into `mats`: the limp body, and while he gets up the get-up clip or the plain blend toward the
+	/// animation.
+	fn pose(&mut self, mats: &mut [M34], anim: &[M34], a: &crate::anim::Animated, place: Place, cue: Cue) {
+		let out = match &self.getup {
+			Some(g) if cue.phase == Phase::GetUp => g.pose(&self.limp_pose(anim, a, place, 0.0), anim, place, cue.blend, &tune()),
+			_ => self.limp_pose(anim, a, place, plain_blend(cue)),
+		};
+		for j in 0..HERO_JOINTS {
+			mats[j] = mul34(&mul34(&out[j], &inv34(&anim[j])), &mats[j]);
+		}
+		self.last_out = out;
+	}
+
+	/// The limp body's joints (model space), moved toward the animation by `s`.
+	fn limp_pose(&self, anim: &[M34], a: &crate::anim::Animated, place: Place, s: f32) -> Vec<M34> {
 		let parents = &a.skeleton.parents;
 		let mut out: Vec<M34> = anim.to_vec();
 		let mut by_joint: Vec<Option<M34>> = vec![None; HERO_JOINTS];
@@ -762,10 +874,95 @@ impl Ragdoll {
 				(None, None) => rigid(j),
 			};
 		}
-		for j in 0..HERO_JOINTS {
-			mats[j] = mul34(&mul34(&out[j], &inv34(&anim[j])), &mats[j]);
-		}
+		out
 	}
+
+	/// The get-up clip for the body as it lies (None: the plain blend). Face down or up by the pelvis's forward axis; none when
+	/// he is not lying (a sitting or upright body), on a free get-up, or when the disc's clip does not look like the measured one.
+	fn plan_getup(&self, a: &crate::anim::Animated, place: Place, cue: Cue) -> Option<GetUp> {
+		let log = crate::retail::ragdoll::log_on();
+		if cue.free || self.bodies.len() != DEFS.len() {
+			return None;
+		}
+		let world = |j: usize| self.driven.iter().find(|d| d.0 == j).map(|&(_, i, off)| mul34(&frame(self.bodies[i].x, self.bodies[i].q), &off));
+		let (pelvis, chest, head) = (world(1)?, world(5)?, world(8)?);
+		let up = head[11] - pelvis[11];
+		if up > LYING_UP {
+			if log {
+				eprintln!("ragdoll: get-up plain (not lying: head {up:.2} above the pelvis)");
+			}
+			return None;
+		}
+		let face_up = pelvis[8] > 0.0;
+		let t = tune();
+		let (seq, range) = if face_up { (KIPUP_SEQ, t.kipup) } else { (CROUCH_SEQ, t.crouch) };
+		let s = a.sequences.get(seq)?;
+		let last = s.frames.len().checked_sub(1)? as f32;
+		let (f0, f1) = (range[0].clamp(0.0, last) as usize, range[1].clamp(0.0, last) as usize);
+		let order: Vec<usize> = if f0 <= f1 { (f0..=f1).collect() } else { (f1..=f0).rev().collect() };
+		if order.len() < 2 {
+			return None;
+		}
+		let frames: Vec<Vec<M34>> = order
+			.iter()
+			.map(|&i| {
+				let skin = a.pose_single(&s.frames[i]);
+				(0..HERO_JOINTS).map(|j| a.joint_world(&skin, j)).collect()
+			})
+			.collect();
+		let clip_up = |f: &[M34]| f[8][11] - f[1][11];
+		let (u0, u1) = (clip_up(&frames[0]), clip_up(frames.last()?));
+		if u0 > CLIP_LOW || u1 < CLIP_STAND {
+			if log {
+				eprintln!("ragdoll: get-up plain (seq {seq} frames {f0}..{f1} do not go from low to standing: up {u0:.2} -> {u1:.2})");
+			}
+			return None;
+		}
+		// Turned so the clip's pelvis-to-chest line lies along the body's, its pelvis on the body's pelvis, and no lower than the floor
+		// the body lies on (the lowest point of its spheres): the hunch's pelvis is higher than a body lying flat.
+		let first = &frames[0];
+		let along_clip = place.to_world_v(sub(tr(&first[5]), tr(&first[1])));
+		let along_body = sub(tr(&chest), tr(&pelvis));
+		let turn = if along_clip[0].hypot(along_clip[1]) > 0.05 && along_body[0].hypot(along_body[1]) > 0.05 {
+			wrap_angle(along_body[1].atan2(along_body[0]) - along_clip[1].atan2(along_clip[0]))
+		} else {
+			0.0
+		};
+		let cp = rot_z(turn, place.to_world_v(tr(&first[1])));
+		let bp = tr(&pelvis);
+		let floor = self.bodies.iter().flat_map(|b| b.spheres.iter().map(move |&(c, r)| add(b.x, qrot(b.q, c))[2] - r)).fold(f32::MAX, f32::min);
+		let at = [bp[0] - cp[0], bp[1] - cp[1], (bp[2] - cp[2]).max(floor)];
+		if log {
+			eprintln!(
+				"ragdoll: get-up clip face {} seq {seq} frames {f0}..{f1} turn {:.0} deg, {:.2} from him, floor {:.2} (his feet {:.2})",
+				if face_up { "up" } else { "down" },
+				turn.to_degrees(),
+				(at[0] - place.pos[0]).hypot(at[1] - place.pos[1]),
+				floor,
+				place.pos[2]
+			);
+		}
+		Some(GetUp { frames, at, turn })
+	}
+}
+
+/// The plain get-up blend (0 = limp, 1 = the game's pose): the whole of a free get-up, `PLAIN_SHARE` of the others.
+fn plain_blend(cue: Cue) -> f32 {
+	if cue.phase != Phase::GetUp {
+		return 0.0;
+	}
+	smoothstep(if cue.free { cue.blend } else { cue.blend / PLAIN_SHARE })
+}
+
+/// `v` turned by `a` radians about the world's z.
+fn rot_z(a: f32, v: V3) -> V3 {
+	let (s, c) = a.sin_cos();
+	[v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2]]
+}
+
+fn wrap_angle(a: f32) -> f32 {
+	let t = std::f32::consts::TAU;
+	a - t * ((a + std::f32::consts::PI) / t).floor()
 }
 
 // ---- the solver -------------------------------------------------------------------------------------------------------------

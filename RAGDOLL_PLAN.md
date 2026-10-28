@@ -70,7 +70,46 @@ Status (2026-10-26, end of the first session): phases 0-4 done and tuned. The pl
   (`CAM_Z`), faded out over the get-up, blended between fields like the hero. Drawing only, nothing written. No camera collision
   on the offset: watch for the view clipping into walls after a throw.
 - Untested: the Thruster-Pack (0x10), pits and water while limp, moving platforms, cutscenes, the PAL disc, other planets.
-- The get-up is still a plain 0.6 s blend (phase 5: a retail clip would look better).
+- **Get-up clips (phase 5)**: built and tested 2026-10-27, the player likes the look ("I really like how that looks"), but
+  wanted him up sooner: the Limp time values are halved (0.75 / 1.5 / 2.5 s; tested: "much better").
+- **Knockdown guard** (setting `guard`, default On; built 2026-10-27, not tested in game yet): small enemies in
+  a group kept hitting him while he lay there, every hit restarted the limp time, and he died without getting up (the player
+  finds it funny but frustrating, so it is a setting). With it on, a hit while limp still pushes the body but does not restart
+  the limp time, and no hit knocks him down during the get-up or for `GUARD_S` (2 s) after it (retail's hit still lands, pad
+  free). Log line: `ragdoll: hit guarded`. Off = the old behaviour.
+  First test: "did not seem to work". Cause (from the 11:56 hit log): the knock-back lifts the game's Ratchet off the ground for
+  a moment, Ground -> Fall -> Ground, and every phase change reset the limp count (`t`), so each hit still restarted it. The
+  limp time now counts in `down` (Ground fields of this ragdoll, reset only at a new ragdoll or a hit with the guard off), and
+  `GUARD_S` went from 2 to 3 s (the hits came 2.5-3.3 s apart). Built, not tested yet. Test with `RAC_RUN_LOG=1` as well:
+  this dev build has no `windows_gui`, so without it nothing reaches `player/log.txt`.
+  Second test (log 20:59): the guard now works (`hit guarded` in every get-up, he gets up each time), but he still died: the
+  hits came every ~1.7 s (100 fields) against 4 health, the ~3 s locked down (1.5 s limp + 1.4 s get-up) took two of them, and
+  he got up with 1 health. Player's choice: control during the get-up. With the guard, a hit knockdown now lies `HIT_LIMP_S`
+  (0.5 s, not the Limp time) and the pad is free from the start of the get-up (the clip still plays; if he moves, it slides
+  after him). Tested 2026-10-27: "That's perfect". **Phase 5 (get-up) and the guard are done.** The get-up is now 1.4 s (`GETUP_S`; the free
+  get-up after an edge fall stays the 0.6 s plain blend, `GETUP_FREE_S`, `Cue::free`). When it starts, `plan_getup` looks at
+  the limp body: head less than `LYING_UP` (0.3) above the pelvis = lying, else the old plain blend (over `PLAIN_SHARE` of
+  the get-up). Lying face down (the pelvis's forward axis points down): seq 12 frames 5 -> 14, the rise out of the hunch. Face
+  up: seq 97 frames 14 -> 0, the backflip backwards (a flip from his back onto his feet). The clip is turned so its
+  pelvis-to-chest line lies along the body's, its pelvis put on the body's pelvis (no lower than the floor under the body).
+  Timeline (`getup` = 0.25, 0.85 of the get-up): the limp pose settles into the clip's first frame, the clip plays while it
+  slides and turns onto the game's Ratchet (a thrown body can be up to 6 units away: he visibly slides), then its last frame
+  settles into the game's pose. The body is not stepped while a clip plays; a hit during it starts the body again from the
+  pose drawn last (`last_out`). The camera follow fades out by the slide. A clip whose frames do not go from low to standing
+  is skipped (another disc numbering the sequences differently). Log lines: `get-up clip face up/down ... turn, distance,
+  floor` or `get-up plain (reason)`. Tune live: `crouch=5,14`, `kipup=14,0`, `getup=0.25,0.85` in `RAC_RAGDOLL_TUNE`.
+  Things to watch in the first test: the kip-up's start (frames 9-11 of seq 97 are a bounce; `kipup=8,0` skips it), feet
+  in the floor on slopes, the heading turn looking like a spin, and the slide after long throws.
+- **Phase 5 clip search (2026-10-27)**: `RAC_RAGDOLL_DUMP=1` now also writes `seq` lines (every hero sequence at 0 / 1/4 / 1/2 /
+  3/4 / end: pelvis position and head-above-pelvis `up`, ~0.55 standing, ~0 lying) and, for clips that reach the ground, one
+  `frames up/pelvis/fwd` line (every frame; `fwd` = pelvis forward axis height, -1 face down, +1 face up). USA disc, 162 seqs.
+  **No retail clip goes from lying to standing** (Ratchet is never knocked down in R&C1). Useful pieces:
+  - seq 12 (15 frames, 60 ticks): from standing he drops into a deep forward hunch (frame 5-8: pelvis 0.21-0.27, head at
+    pelvis height, fwd -0.8) and rises back to standing by frame 14. Frames 5-14 = a crouch-to-stand rise.
+  - seq 97 (21 frames): a backflip that ends lying on his back (frames 8-20: pelvis 0.03, fwd +1.0), likely a death clip. Played
+    backwards from frame ~13 it is a flip from his back up to his feet (a kip-up).
+  - seq 22 ends in the same low hunch as seq 12 (a landing). seqs 59-61 / 100 / 101 are swimming; 150 / 153 have all-zero
+    frames (hidden / scaled away), not poses.
 - Settings are read at start-up only (built-in mods rule): change them in the launcher or `mods/settings.json`, then restart.
 
 **Testing it:** `$env:RAC_RAGDOLL = "1"; $env:RAC_RAGDOLL_LOG = "1"; .\Play.cmd` (PowerShell, in the F: folder). The log
@@ -104,9 +143,12 @@ A built-in mod (`plugins.rs`): it shows in the launcher's Mods page with its set
 |---|---|---|---|---|
 | `height` | Fall height | Low / Medium / High | Medium | drop that triggers it: 6 / 8 / 12 units |
 | `button` | Ragdoll button | Off / L3 | L3 | go limp in the air (keyboard: Left Shift) |
-| `time` | Limp time | Short / Medium / Long | Medium | 1.5 / 3 / 5 s on the ground before getting up |
+| `time` | Limp time | Short / Medium / Long | Medium | 0.75 / 1.5 / 2.5 s on the ground before getting up (1.5 / 3 / 5 until 2026-10-27) |
 | `flop` | Floppiness | Stiff / Loose / Noodle | Loose | joint limits and how strongly the body keeps its pose |
 | `bounce` | Bounciness | Off / Some / Lots | Some | share of the impact speed a contact gives back: 0 / 0.35 / 0.6 |
+| `hits` | Enemy hits | Off / On | On | enemy hits knock him down (phase 6) |
+| `guard` | Knockdown guard | Off / On | On | hits while limp do not restart the limp time; no knockdown during the get-up or `GUARD_S` (2 s) after |
+| `camera` | Camera follow | Off / On | On | the camera follows the limp body |
 
 R3 is not offered: it opens the map (measured: game mode 3 the field after R3).
 
@@ -205,7 +247,8 @@ display frame, so a pause freezes it and a cached hero pose stays equal to a fre
 - **Pose**: a driven joint takes its body's frame; every other joint follows its parent with its animated local transform
   (fingers, face, ears, tail, Clank and held items). The skin matrix is `new world x old world^-1 x old skin`, so no inverse bind is
   needed.
-- **Get-up**: blends each driven joint from the ragdoll to the animated pose (smoothstep over `blend`).
+- **Get-up**: lying down, a retail clip played where the body lies (face down: seq 12's rise; face up: seq 97 backwards), see
+  "Get-up clips" above; otherwise each driven joint blends from the ragdoll to the animated pose (smoothstep).
 - **Clank, the packs, the head items**: retail draws them as mobys of their own at its pose of the hero. While limp, `apply` hands
   back the game's pose and `strafe::pose_fix_between` (the Modern-strafe pose fix) carries them onto the limp body
   (`Smooth::attach`). First test: Clank stayed in the air without it.
@@ -239,7 +282,7 @@ display frame, so a pause freezes it and a cached hero pose stays equal to a fre
 2. **Limp body**: bodies, joints, collision, tether, pose. Done.
 3. **Get-up blend.** Done (plain blend).
 4. **Tuning** in game. Done (approved defaults above). Not done: wobbly ears and tail, sliding on slopes.
-5. **Polish (optional)**: a retail get-up clip, an impact sound.
+5. **Polish (optional)**: a retail get-up clip (done and approved 2026-10-27), an impact sound (not done).
 6. **Enemy hits knock him down** (requested 2026-10-26): the hit reaction (state 0x16, health going down) starts a ragdoll too,
    with the push of the hit (retail's knock-back velocity) on the body; a setting to switch it on. A hit while already limp
    pushes the body again. Notes for it: the worker sees the hit as state 0x16 (group 7) and health dropping (`mode` log lines);
