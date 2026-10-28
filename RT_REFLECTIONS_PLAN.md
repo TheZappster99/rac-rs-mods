@@ -1,7 +1,8 @@
 # Ray-traced reflections: plan
 
-Status (2026-10-28): phase 1 built and checked at start-up (the run log says `rt reflections: on, quality Performance`); not yet
-measured in a level. Next: phase 2.
+Status (2026-10-28): phases 1 and 2 done. Phase 2 checked on Veldin with RAC_POST_VIEW=rtrefl: the static world traced and
+shaded matches the drawn textures and colours (no speckle), the moving things land where they are drawn; every pixel at half
+size costs 0.05-0.09 ms (1280x720 window). Next: phase 3.
 
 The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
 (2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics

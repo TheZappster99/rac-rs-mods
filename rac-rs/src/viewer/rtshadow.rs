@@ -91,10 +91,11 @@ pub(super) fn shadows() -> bool {
 	SHADOWS.load(Ordering::Relaxed)
 }
 
-/// Vertex and index buffers also feed the structure builds (and the index copies) while ray tracing is on.
+/// Vertex and index buffers also feed the structure builds (and the index copies) while ray tracing is on, and the reflections
+/// read the static batches' vertices at a ray's hit (`Hit`, rtrefl.rs).
 pub(super) fn usage(u: wgpu::BufferUsages) -> wgpu::BufferUsages {
 	match on() && u.intersects(wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX) {
-		true => u | wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_SRC,
+		true => u | wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE,
 		false => u,
 	}
 }
@@ -435,6 +436,9 @@ impl Masks {
 struct Geo<'a> {
 	batch: &'a Batch,
 	verts: &'a [Vertex],
+	/// The source batch (`Hit::verts` index: world, terrain, ties, shrubs) and each triangle's texture slot, in run order.
+	src: u32,
+	tex: Vec<u32>,
 	cut: bool,
 	runs: Vec<(u32, u32, Mask)>,
 	first: u32,
@@ -463,6 +467,41 @@ pub(super) struct RtShadow {
 	mask_bind: Option<(wgpu::TextureView, wgpu::BindGroup)>,
 	/// Phase 4 (rtmovers.rs): the moving casters, rebuilt every frame into the top level's slot 1.
 	movers: super::rtmovers::RtMovers,
+	/// What a ray that hits the static world needs to shade the hit (rtrefl.rs), and a number that changes with every level's
+	/// structure (so the passes that bind it rebind). None until a level is built, or when a buffer is past the binding limit.
+	hit: Option<Hit>,
+	hit_gen: u64,
+}
+
+/// The static world's hit data (rtrefl.rs `RT_HIT`): the compact index buffer the structure was built from, each triangle's
+/// texture slot (the bindless array's index, `Draw::texture`) in the structure's order, per geometry (first index, source batch)
+/// as `MAX_GEOS` vec4<u32>, and the source batches' vertex buffers (world, terrain, ties, shrubs; `Vertex`, 16 floats each).
+pub(super) struct Hit {
+	pub idx: wgpu::Buffer,
+	pub tex: wgpu::Buffer,
+	pub geo: wgpu::Buffer,
+	pub verts: [wgpu::Buffer; 4],
+}
+
+/// The hit data of a structure built from `geos` over the compact index buffer `idx`, with `batches` (world, terrain, ties,
+/// shrubs) as the sources. None when a buffer is past the device's storage binding limit (the reflections then trace nothing).
+fn hit_data(device: &wgpu::Device, geos: &[Geo], idx: wgpu::Buffer, batches: [&Batch; 4]) -> Option<Hit> {
+	use wgpu::util::DeviceExt;
+	let tex: Vec<u32> = geos.iter().flat_map(|g| g.tex.iter().copied()).collect();
+	let mut geo = [[0u32; 4]; MAX_GEOS];
+	for (k, g) in geos.iter().enumerate() {
+		geo[k] = [g.first, g.src, 0, 0];
+	}
+	let limit = device.limits().max_storage_buffer_binding_size as u64;
+	let over: Vec<String> = batches.iter().map(|b| b.vbuf.size()).chain([idx.size(), tex.len() as u64 * 4]).filter(|&s| s > limit).map(|s| format!("{} MB", s >> 20)).collect();
+	if !over.is_empty() {
+		eprintln!("rt reflections: hit data past the storage binding limit ({} MB): {}; nothing traced", limit >> 20, over.join(", "));
+		return None;
+	}
+	let mk = |label, contents: &[u8], usage| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
+	let tex = mk("rt hit textures", bytemuck::cast_slice(&tex), wgpu::BufferUsages::STORAGE);
+	let geo = mk("rt hit geometries", bytemuck::cast_slice(&geo), wgpu::BufferUsages::UNIFORM);
+	Some(Hit { idx, tex, geo, verts: batches.map(|b| b.vbuf.clone()) })
 }
 
 const IDENTITY: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -485,7 +524,7 @@ impl RtShadow {
 		let mut enc = device.create_command_encoder(&Default::default());
 		enc.build_acceleration_structures(std::iter::empty(), std::iter::once(&tlas));
 		queue.submit([enc.finish()]);
-		RtShadow { tlas, tris, bits, blas: None, key: None, tune: Tune::default(), tune_seen: None, mask, view, view_next, mask_pipeline, mask_bind: None, movers: Default::default() }
+		RtShadow { tlas, tris, bits, blas: None, key: None, tune: Tune::default(), tune_seen: None, mask, view, view_next, mask_pipeline, mask_bind: None, movers: Default::default(), hit: None, hit_gen: 0 }
 	}
 
 	/// The frame's shadow mask, after the level pass (`depth` its depth, `cam` / `aspect` / `range` its camera, `dir` the light's
@@ -609,6 +648,7 @@ impl RtShadow {
 		let t = std::time::Instant::now();
 		self.key = Some(scene.world.ibuf.clone());
 		self.blas = None;
+		self.hit = None;
 		// The last mask belongs to the old level.
 		queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&RtView::zeroed()));
 		self.tlas[0] = None;
@@ -626,8 +666,9 @@ impl RtShadow {
 		// Opaque geometries first, then the cut ones; adjacent runs of one mesh merge (a cut run only with the same mask).
 		let mut opaque = Vec::new();
 		let mut cut = Vec::new();
-		for (batch, verts, draws, c) in &sources {
-			let (mut o, mut k) = (Geo { batch: *batch, verts: *verts, cut: false, runs: Vec::new(), first: 0, count: 0 }, Geo { batch: *batch, verts: *verts, cut: true, runs: Vec::new(), first: 0, count: 0 });
+		for (src, (batch, verts, draws, c)) in sources.iter().enumerate() {
+			let geo = |cut| Geo { batch: *batch, verts: *verts, src: src as u32, tex: Vec::new(), cut, runs: Vec::new(), first: 0, count: 0 };
+			let (mut o, mut k) = (geo(false), geo(true));
 			for d in draws {
 				let m = masks.get(&scene.rt_alpha, d.texture, *c, &self.tune);
 				let g = match m {
@@ -635,6 +676,8 @@ impl RtShadow {
 					Mask::Solid => &mut o,
 					Mask::Cut { .. } => &mut k,
 				};
+				// Runs merge across draws, so each triangle's texture is kept here, in the same order.
+				g.tex.extend(std::iter::repeat_n(d.texture as u32, d.count as usize / 3));
 				match g.runs.last_mut() {
 					Some((s, n, Mask::Solid)) if *s + *n == d.start && matches!(m, Mask::Solid) => *n += d.count,
 					Some((s, n, Mask::Cut { off, .. })) if *s + *n == d.start && matches!(m, Mask::Cut { off: o2, .. } if o2 == *off) => *n += d.count,
@@ -663,7 +706,7 @@ impl RtShadow {
 				g.cut = false;
 			}
 		}
-		let ibuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt shadow indices"), size: total as u64 * 4, usage: wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+		let ibuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt shadow indices"), size: total as u64 * 4, usage: wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
 		let mut enc = device.create_command_encoder(&Default::default());
 		for g in &geos {
 			let mut at = g.first as u64;
@@ -740,7 +783,14 @@ impl RtShadow {
 			t.elapsed().as_secs_f64() * 1e3
 		);
 		self.blas = Some(blas);
+		self.hit = hit_data(device, &geos, ibuf, [&scene.world, &scene.tfrags, &scene.ties, &scene.shrubs]);
+		self.hit_gen += 1;
 		true
+	}
+
+	/// The static world's hit data with a number that changes with each level's structure (None: not built, or not bindable).
+	pub(super) fn hit(&self) -> Option<(&Hit, u64)> {
+		self.hit.as_ref().filter(|_| self.blas.is_some()).map(|h| (h, self.hit_gen))
 	}
 }
 

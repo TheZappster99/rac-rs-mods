@@ -312,6 +312,8 @@ pub(super) struct SunShadow {
 	pub rt: Option<super::rtshadow::RtShadow>,
 	/// [PC] Ray-traced sun rays (rtrays.rs), when on: they trace through `rt`'s structure.
 	pub rt_rays: Option<super::rtrays::RtRays>,
+	/// [PC] RAC_POST_VIEW=rtrefl (rtrefl.rs `Debug`): the camera's rays traced through `rt`'s structure and shaded.
+	pub rt_refl: Option<super::rtrefl::Debug>,
 }
 
 impl SunShadow {
@@ -394,7 +396,7 @@ impl SunShadow {
 			})
 		});
 		let (pipeline_shrub, pipeline_tfrag, pipeline_tie) = (make_cut("fs_sh_shrub"), make_cut("fs_sh_tfrag"), make_cut("fs_sh_tie"));
-		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None, soft_off: super::volfog::soft::off_buffer(device), rt: None, rt_rays: None }
+		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None, soft_off: super::volfog::soft::off_buffer(device), rt: None, rt_rays: None, rt_refl: None }
 	}
 
 	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2, at 3 the fog's no-Z

@@ -546,6 +546,10 @@ fn scene_at(c: vec2<i32>, dim: vec2<i32>, off: vec2<f32>) -> vec3<f32> {
 	let sat = (mx3 - min(l.r, min(l.g, l.b))) / max(mx3, 1e-4);
 	let k = 1.0 + (p.grade.y - 1.0) * (1.0 - sat);
 	l = max(vec3<f32>(y) + (l - vec3<f32>(y)) * k, vec3<f32>(0.0));
+	if (p.half.w < -1.5) {
+		// Dev view (RAC_POST_VIEW=rtrefl, rtrefl.rs): what the traced rays hit, alone (the rays target, written by its debug pass).
+		return vec4<f32>(min(textureSampleLevel(rays_in, lsamp, v.uv, 0.0).rgb, vec3<f32>(1.0)), 1.0);
+	}
 	if (p.half.w < 0.0) {
 		// Dev view (RAC_POST_VIEW=ao): the occlusion alone.
 		let hs = vec2<i32>(textureDimensions(lin));
@@ -1089,7 +1093,7 @@ impl Post {
 		let (ao_taps, ao_reach) = ao_quality(ao_level);
 		let mut u = PostU {
 			size: [w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32],
-			half: [hw, hh, 1.0 / hw, if view_ao() { -1.0 } else { 1.0 / hh }],
+			half: [hw, hh, 1.0 / hw, if super::rtrefl::debug_view() { -2.0 } else if view_ao() { -1.0 } else { 1.0 / hh }],
 			proj: [cam.tan_half * aspect, cam.tan_half, RETAIL_NEAR, far],
 			params: [if ao { AO_STRENGTH } else { 0.0 }, BLOOM_STRENGTH, SHARPEN, BLOOM_THRESHOLD],
 			grade: [CONTRAST, SATURATION, 0.0, AO_RADIUS],

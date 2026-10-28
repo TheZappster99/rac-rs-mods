@@ -160,6 +160,10 @@ impl Gpu {
 				if let (Some(col), Some(f), Some(rt), Some(rr)) = (dfx.rt_rays, &dc.sun, &self.sun.rt, &mut self.sun.rt_rays) {
 					rr.run(&self.device, &self.queue, &mut enc, rt, &self.post, cam, aspect, f, col, gfx.sun_q);
 				}
+				// [PC] RAC_POST_VIEW=rtrefl (rtrefl.rs): what the camera's rays hit, traced and shaded, over the rays target.
+				if let (Some(rt), Some(rd), Some(array)) = (&self.sun.rt, &mut self.sun.rt_refl, scene.tex_array.as_ref()) {
+					rd.run(&self.device, &self.queue, &mut enc, rt, &self.post, cam, aspect, array);
+				}
 				self.post.composite(&mut enc, &self.msaa, gi_level);
 				cuts.cut(&self.device, &mut enc, "f_post");
 				pass = self.hud_pass(enc, cuts, view, rs);
