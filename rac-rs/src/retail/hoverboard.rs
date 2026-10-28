@@ -108,6 +108,8 @@ struct Mod {
 	last_pos: Option<[f32; 3]>,
 	/// Fields away from the riding states.
 	away: u32,
+	/// Fields left of the hold on the mud surface (`SKIM_HOLD`).
+	skim: u32,
 	lean: f32,
 	tick: u32,
 	cue: Cue,
@@ -193,19 +195,42 @@ static RIDING: AtomicBool = AtomicBool::new(false);
 /// SetState calls refused so far (the log says the first of every `SKIM_LOG_EVERY`).
 static SKIMS: AtomicU32 = AtomicU32::new(0);
 const SKIM_LOG_EVERY: u32 = 50;
+/// The mud surface (f32 bits) of the last refused SetState, and whether one was refused since the last `pre_field`.
+static SKIM_SURF: AtomicU32 = AtomicU32::new(0);
+static SKIMMED: AtomicBool = AtomicBool::new(false);
 
 /// Mud's sinking states: sinking (quicksand, Aridia's mud) and the mud death.
 const MUD_STATES: [u32; 2] = [0x68, 0x7b];
+/// The mud's surface height under him: retail's mud check (Aridia FUN_0021b698, hero block 0x13f350 + 0x2f4) asks for the
+/// sinking state while his z + 0.25 is within 1.0 of it and he is below it.
+pub const MUD_SURF: u32 = 0x13f644;
+/// Retail asks for the sinking state only near the surface (see `MUD_SURF`): a hold of more than this would be a wrong surface.
+const MUD_WINDOW: f32 = 1.25;
+/// Deeper than this under the surface while riding, the hold failed: the sinking state is let through (he steps off in the
+/// mud as before) instead of refused, since past `MUD_WINDOW` retail stops asking and he would fall through the map.
+const MUD_GIVE_UP: f32 = 0.6;
+/// Fields the hold keeps him on the surface after the last refused SetState (retail does not ask on the field he is held
+/// level with the surface, so a single field's gap must not drop him).
+const SKIM_HOLD: u32 = 3;
 
-/// The SetState hand (strafe/chain.rs `set_state_any`), with the state SetState is asked for: true = refuse it. While he rides,
-/// the mud's sinking states are refused, so the board skims over mud and quicksand (he stays in the run or the fall he was in;
-/// retail asks again every tick he is on the mud, and is refused each time).
-pub fn refuse_state(to: u32) -> bool {
+/// The SetState hand (strafe/chain.rs `set_state_any`), with the state SetState is asked for, his z and the mud surface:
+/// true = refuse it. While he rides, the mud's sinking states are refused, so the board skims over mud and quicksand (retail
+/// asks again every tick he is on the mud, and is refused each time). The sinking state is what holds him up on the mud face,
+/// so `field` lifts him back to the surface before each field (`SKIM_HOLD`).
+pub fn refuse_state(to: u32, z: f32, surf: f32) -> bool {
 	if !RIDING.load(Ordering::Relaxed) || !MUD_STATES.contains(&to) {
 		return false;
 	}
+	if surf - z > MUD_GIVE_UP {
+		if log_on() {
+			eprintln!("hoverboard: too deep in the mud (z {z:.2}, surface {surf:.2}), SetState {to:#x} let through");
+		}
+		return false;
+	}
+	SKIM_SURF.store(surf.to_bits(), Ordering::Relaxed);
+	SKIMMED.store(true, Ordering::Relaxed);
 	if log_on() && SKIMS.fetch_add(1, Ordering::Relaxed) % SKIM_LOG_EVERY == 0 {
-		eprintln!("hoverboard: skims over mud (SetState {to:#x} refused)");
+		eprintln!("hoverboard: skims over mud (SetState {to:#x} refused, z {z:.2}, surface {surf:.2})");
 	}
 	true
 }
@@ -227,7 +252,21 @@ fn field(m: &mut Machine, s: &mut Mod) {
 	let form = m.rd8(BODY_FORM);
 	let state = m.rd32(HERO_STATE);
 	let airborne = m.rd16(HERO_AIRBORNE) != 0;
-	let pos = m.rdv3(HERO_POS);
+	let mut pos = m.rdv3(HERO_POS);
+	// Skimming mud: retail's sinking state, refused, is what stands him on the mud face, so the board holds him on its surface.
+	if SKIMMED.swap(false, Ordering::Relaxed) {
+		s.skim = SKIM_HOLD;
+	}
+	if !s.on {
+		s.skim = 0;
+	} else if s.skim > 0 {
+		s.skim -= 1;
+		let surf = f32::from_bits(SKIM_SURF.load(Ordering::Relaxed));
+		if pos[2] < surf && surf - pos[2] < MUD_WINDOW {
+			m.cpu.mem.wr32(HERO_POS + 8, surf.to_bits());
+			pos[2] = surf;
+		}
+	}
 	let moved = s.last_pos.map(|p0| [pos[0] - p0[0], pos[1] - p0[1], pos[2] - p0[2]]);
 	let teleport = moved.is_some_and(|d| d.iter().any(|v| v.abs() > JUMP));
 	let real = moved.filter(|_| !teleport).map_or(0.0, |d| d[0].hypot(d[1]) / dt);

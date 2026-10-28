@@ -61,7 +61,8 @@ pub(super) fn hands() -> &'static [Hand] {
 
 fn set_state_any(c: &mut Cpu) -> bool {
 	// Hoverboard (retail/hoverboard.rs): while he rides, mud's sinking states are refused (SetState answers 0, nothing changes).
-	if crate::retail::hoverboard::refuse_state(c.g(4) as u32) {
+	let (z, surf) = (f32::from_bits(c.mem.rd32(HERO_POS + 8)), f32::from_bits(c.mem.rd32(crate::retail::hoverboard::MUD_SURF)));
+	if crate::retail::hoverboard::refuse_state(c.g(4) as u32, z, surf) {
 		c.s(2, 0);
 		return true;
 	}

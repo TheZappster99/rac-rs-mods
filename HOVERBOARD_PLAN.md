@@ -75,7 +75,14 @@ on Quick Select hands you the board), then a real Quick Select slot of its own (
 - **Mud and quicksand**: the player sank (log: `dismount (state, state 0x68)`, Aridia-style mud). Retail asks SetState for 0x68
   (sinking) whenever he stands on mud. While he rides, the SetState hand that strafe/chain.rs already has on all 19 levels (both
   discs) now refuses 0x68 / 0x7b (`hoverboard::refuse_state`), so the board skims over mud. With the Modern controls off,
-  machine.rs registers those hands for the board alone. Log: `hoverboard: skims over mud`. Not tested yet.
+  machine.rs registers those hands for the board alone. Log: `hoverboard: skims over mud`.
+- **Round 3 (2026-10-28): fell through the map on mud.** The sinking state is what stands him on the mud face (a soft face
+  over a lower floor), so with it refused he dropped, and past about a unit under the surface retail stops asking (its mud
+  check in Aridia FUN_0021b698 asks only while z + 0.25 is within 1.0 of the surface `0x13f644`), so he fell on through. Now
+  each refusal notes the surface and `field` lifts him back onto it before the next `SKIM_HOLD` fields (only when he is under it
+  by less than `MUD_WINDOW`). Safety net: deeper than `MUD_GIVE_UP` under the surface the sinking state is let through, so he
+  sinks and steps off as before instead of falling. Log: `skims over mud (..., z, surface)` / `too deep in the mud`. Tested in
+  game (2026-10-28, after the v0.4.1 merge): the player says it works very well.
 - **The race clips**: `RAC_HOVER_DUMP` found Ratchet's own hoverboard race sequences, present only on level 0, Rilgar (5) and
   Kalebo III (16): 82 ride loop, 86 / 104 carves (taken as heel / toe side), 85 jump, 97 / 98 falling off. The pose now plays
   them (`race_pose`), read from Rilgar at level load when the level lacks them (`race_clips`), with the plain stance as a fall-
