@@ -156,6 +156,12 @@ pub fn register() {
 	}
 }
 
+/// The SetState hands alone (chain.rs) for the Hoverboard's mud check (retail/hoverboard.rs `refuse_state`), when `register` did
+/// not add them; their strafe part checks `enabled()` per call, so they change nothing else then.
+pub fn register_set_state() {
+	register_hand(chain::hands());
+}
+
 // ---- state --------------------------------------------------------------------------------------------------------------
 
 /// What the renderer needs of one field (part of `HeroParts`, so it travels with the field it was measured in).

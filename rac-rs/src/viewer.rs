@@ -72,6 +72,7 @@ mod heroanim;
 mod smooth;
 mod herocache; mod follow;
 mod ragdoll;
+pub mod hoverboard;
 mod gpucache;
 mod tiegpu;
 mod interp;
@@ -1562,6 +1563,8 @@ struct App {
 	hero_cache: Option<herocache::HeroCache>,
 	/// Ragdoll Ratchet's limp body (viewer/ragdoll.rs): steps once per game field while the game's Ratchet is limp.
 	ragdoll: ragdoll::Ragdoll,
+	/// Hoverboard (viewer/hoverboard.rs): the riding pose and the board while he rides.
+	hoverboard: hoverboard::Hoverboard,
 	/// The wrench in Ratchet's hand: its vertices and normals in his wrist joint's frame.
 	wrench: Option<Posed>,
 	/// Wrench joints 0 and 1 in the held pose, in the wrist frame (the hit sweep's endpoints, FUN_00259918).

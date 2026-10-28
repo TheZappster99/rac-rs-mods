@@ -67,6 +67,10 @@ pub(super) fn register_hooks(mut m: &mut ee_oracle::Machine, cold: Option<&Strin
 		aim::register();
 		eprintln!("retail: modern camera on (F7 toggles, RMB aims)");
 	}
+	// Hoverboard (retail/hoverboard.rs): the SetState hands that skim the board over mud (register_hand adds a set once).
+	if crate::plugins::on_at_start(crate::retail::hoverboard::ID) && !disc::extras_off() {
+		strafe::register_set_state();
+	}
 	// PC options rows (retail/pcext.rs): registered after modcam's hands; RAC_PC_EXT=0 registers nothing.
 	if pcext::enabled() {
 		pcext::register();

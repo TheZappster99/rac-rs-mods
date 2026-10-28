@@ -127,6 +127,10 @@ $hero_anim.as_ref().map(|h| {
 					for _ in 0..3 {
 						append(&h.0.mesh);
 					}
+					// Hoverboard (viewer/hoverboard.rs): the board after them, only with the mod on.
+					if let Some(b) = crate::viewer::hoverboard::board_mesh() {
+						append(&b);
+					}
 					m
 				})
 	};
@@ -694,6 +698,10 @@ crate::loadlog::say(|| "host: moby classes done".into());
 					None
 				}
 			});
+			// Hoverboard (viewer/hoverboard.rs): the race clips from the race level when this level's Ratchet lacks them (once a run).
+			if !front {
+				super::hoverboard::race_clips(&mut disc, hero_anim.as_ref().map(|h| &h.1));
+			}
 			// The pause-menu hero clips, appended after Ratchet's level sequences (index = menu_clip_base + N).
 			let menu_clip_base = hero_anim.as_mut().and_then(|(_, a)| match anim::menu_clips(&mut disc, a.skeleton.parents.len()) {
 				Ok(c) => {
@@ -719,6 +727,9 @@ crate::loadlog::say(|| "host: moby classes done".into());
 			// Ragdoll Ratchet measuring dump (retail/ragdoll.rs): inert unless RAC_RAGDOLL_DUMP=1.
 			if let Some((c, a)) = hero_anim.as_ref() {
 				crate::retail::ragdoll::dump_skeleton(l.id, c, a);
+				// Hoverboard stance dump (viewer/hoverboard.rs): inert unless RAC_HOVER_DUMP=1.
+				super::hoverboard::dump_stances(l.id, a);
+				super::hoverboard::dump_race_levels();
 			}
 crate::loadlog::say(|| "host: hero anim + clips done".into());
 			let mut hero_items: HashMap<u8, HeroItem> = HashMap::new();
@@ -1264,6 +1275,10 @@ crate::loadlog::say(|| "host: ship bundle done".into());
 			}
 			// NOV-33.1: untextured moby faces draw with the retail 8 x 8 grey texel 0x80808080.
 			textures.insert(crate::level::texture_key(crate::level::TextureGroup::Moby, crate::mobies::FLAT_SLOT), Texture { w: 8, h: 8, rgba: vec![[128, 128, 128, 255]; 64] });
+			// Hoverboard (viewer/hoverboard.rs): the board's own texture, only with the mod on.
+			if let Some(t) = super::hoverboard::board_texture() {
+				textures.insert(super::hoverboard::BOARD_KEY, t);
+			}
 crate::loadlog::say(|| "host: (rest) before metal textures".into());
 			// NOV-35b: the chrome / glass sphere-map textures of moby metal packets.
 			match l.metal_textures().map(|t| crate::texpack::extra_hd::hd_metal(&l, t)) {

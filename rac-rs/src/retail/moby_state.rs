@@ -268,6 +268,8 @@ pub struct HeroParts {
 	pub strafe: strafe::Draw,
 	/// Ragdoll Ratchet's phase of this field (ragdoll.rs; default = off). Picture only.
 	pub ragdoll: crate::retail::ragdoll::Cue,
+	/// Hoverboard's ride of this field (hoverboard.rs; default = not riding). Picture only.
+	pub hoverboard: crate::retail::hoverboard::Cue,
 	/// The hero +0x60 weighted layers (gadget / weapon hold arms) in chain order (`layer_list`).
 	pub layers: Vec<crate::anim::ListLayer>,
 	pub clank_fx: Vec<crate::anim::JointFx>,

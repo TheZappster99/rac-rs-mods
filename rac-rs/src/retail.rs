@@ -90,6 +90,7 @@ pub mod pcrender;
 pub mod strafe;
 pub mod strafe_feel;
 pub mod ragdoll;
+pub mod hoverboard;
 pub mod shipmouse;
 pub mod debugkeys;
 pub mod devtools;

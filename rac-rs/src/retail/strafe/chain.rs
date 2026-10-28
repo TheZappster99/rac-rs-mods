@@ -59,6 +59,11 @@ pub(super) fn hands() -> &'static [Hand] {
 }
 
 fn set_state_any(c: &mut Cpu) -> bool {
+	// Hoverboard (retail/hoverboard.rs): while he rides, mud's sinking states are refused (SetState answers 0, nothing changes).
+	if crate::retail::hoverboard::refuse_state(c.g(4) as u32) {
+		c.s(2, 0);
+		return true;
+	}
 	match (*crate::retail::disc::pick(&ROWS, &ROWS_USA)).iter().find(|r| r.set_state == c.pc) {
 		Some(r) => land_jump(c, r),
 		None => false,

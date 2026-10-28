@@ -126,8 +126,37 @@ impl Plugin for RagdollRatchet {
 	}
 }
 
+/// Hoverboard (retail/hoverboard.rs, viewer/hoverboard.rs; HOVERBOARD_PLAN.md): the board button (d-pad Down, or L3) on the ground
+/// steps Ratchet onto a hoverboard and off again. Retail still moves him (his run, at the board's speed and heading); the pose and the board are drawn.
+struct Hoverboard;
+
+impl Plugin for Hoverboard {
+	fn id(&self) -> &'static str {
+		crate::retail::hoverboard::ID
+	}
+	fn name(&self) -> &'static str {
+		"Hoverboard"
+	}
+	fn description(&self) -> &'static str {
+		"Press Down on the d-pad (Down arrow) on the ground to hop on a hoverboard, and again to hop off. The Board button setting can move it to L3 (Left Shift) instead, which is also the ragdoll button in the air. Push the stick to speed up and carve turns, let go to coast, pull back to brake. Jump with X as usual. Built into the game."
+	}
+	fn env_force(&self) -> Option<&'static str> {
+		Some("RAC_HOVERBOARD")
+	}
+	fn settings(&self) -> &'static [Setting] {
+		&[
+			Setting { id: "button", name: "Board button", values: &["Down", "L3"], default: 0 },
+			Setting { id: "speed", name: "Top speed", values: &["Slow", "Medium", "Fast"], default: 1 },
+			Setting { id: "turn", name: "Turning", values: &["Tight", "Loose"], default: 0 },
+		]
+	}
+	fn pre_field(&self, m: &mut ee_oracle::Machine) {
+		crate::retail::hoverboard::pre_field(m);
+	}
+}
+
 /// Every built-in mod, in menu order. A new one is a type implementing `Plugin` and one entry here.
-static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays, &RagdollRatchet];
+static PLUGINS: &[&dyn Plugin] = &[&RtShadows, &RtSunRays, &RagdollRatchet, &Hoverboard];
 
 // ---- state ------------------------------------------------------------------------------------------------------------------
 

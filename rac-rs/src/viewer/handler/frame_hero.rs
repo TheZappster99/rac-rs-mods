@@ -64,20 +64,24 @@ impl App {
 				let mut mats = self.hero_rig.hero.pose_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses);
 				// Modern controls (retail/strafe.rs): the legs twist toward the ground path while aiming (off = zero twist); retail's parts follow (`strafe_fix`).
 				let mut ragdoll_logic = None;
+				let mut board_logic = None;
 				if let Some(q) = rparts {
 					crate::retail::strafe::twist_mats(&mut mats, a, q.strafe.twist);
+					// Hoverboard (viewer/hoverboard.rs): while he rides, the riding stance replaces the pose; off = untouched.
+					board_logic = self.hoverboard.apply(&mut mats, a, q.hoverboard);
 					// Ragdoll Ratchet (viewer/ragdoll.rs): while he is limp the ragdoll's body replaces the pose; off = untouched.
 					let place = crate::viewer::ragdoll::Place { pos: p.pos, rows: hero_rows(p) };
 					ragdoll_logic = self.ragdoll.apply(&mut mats, a, q.ragdoll, place, w);
 					follow::capture(&q.follow, mats.len(), |j| norm_cols(a.joint_world(&mats, j)));
 				}
 				// Clank, the packs and the head items retail hangs on its own pose follow the drawn one: the limp body, or the strafe draw.
-				let fix = match &ragdoll_logic {
+				let fix = match ragdoll_logic.as_ref().or(board_logic.as_ref()) {
 					Some(logic) => crate::retail::strafe::pose_fix_between(a, &mats, logic),
 					None => rparts.and_then(|q| strafe_fix(&self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats)),
 				};
 				self.smooth.set_pose_fix(fix);
-				self.smooth.set_limp(ragdoll_logic.is_some());
+				// The held weapon follows the drawn pose too: the limp body, or the riding stance.
+				self.smooth.set_limp(ragdoll_logic.is_some() || board_logic.is_some());
 				// HELD-GLOVE: a glove in hand (FUN_0020d018) is posed from the hero's own live local joints, not its clock.
 				let hand_copy = crate::inventory::hand_pose_copy(game.inv.equipped);
 				let hero_local = if hand_copy { self.hero_rig.hero.local_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses) } else { Vec::new() };
@@ -365,6 +369,13 @@ impl App {
 					ps.extend(gp.iter().map(|&v| local(v, 1.0)));
 					ns.extend(gn.iter().map(|&v| local(v, 0.0)));
 					ghost_ranges[2 + gi] = Some((base, ps.len(), alpha));
+				}
+				// Hoverboard: the board after the afterimages (app.rs `combined_hero!` appends it only with the mod on), hidden when
+				// he is not riding.
+				if crate::plugins::on_at_start(crate::retail::hoverboard::ID) {
+					let (bp, bn) = self.hoverboard.board(rparts.map_or(Default::default(), |q| q.hoverboard));
+					ps.extend(bp);
+					ns.extend(bn);
 				}
 				// Ragdoll Ratchet: a hidden part (`hide`) sits at the model origin, his feet where the game stands him. The tick blend
 				// draws a part that was hidden one tick and shown the next (a gun, the wrench, the flicker after a hit) moving from there,
