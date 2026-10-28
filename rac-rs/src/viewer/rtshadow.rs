@@ -11,11 +11,12 @@
 //!   none is left out; the rest are non-opaque geometry whose triangles carry their uvs and a 1-bit mask of their texture
 //!   (`rt_tris`, `rt_bits`), so a ray takes a candidate hit only on a kept texel (vines and leaves cast their holes).
 //! - Soft shadows: after the level pass, `mask` traces `RAYS` rays over the sun's disc for every pixel of its depth into a
-//!   shadow mask, with the camera it used. The static world's shadow at a world point holds from frame to frame; a moving caster's
-//!   shadow in the mask lags one frame.
+//!   shadow mask, with the camera it used. The static world's shadow at a world point holds from frame to frame, so the rays turn
+//!   each frame and the world's share is blended with the last frame's (`HISTORY`); the moving casters' share is the frame's own.
+//!   A moving caster's shadow in the mask lags one frame.
 //! - Receivers: `sun_occ` (viewer.rs SHADER, rewritten by `shader`) projects its world point into the last frame's mask and
-//!   takes the mean of the 3x3 pixels whose depth matches; with fewer than 3 (off screen, newly revealed, a see-through layer in
-//!   front) it traces one ray of its own, out to `REACH`. Until the level's structure is built (`rt_view.sun.w` 0) it reads the
+//!   takes the mean of the 3x3 pixels whose depth matches (within the surface's depth slope); with none (off screen, newly
+//!   revealed, a see-through layer in front) it traces one ray of its own, out to `REACH`. Until the level's structure is built (`rt_view.sun.w` 0) it reads the
 //!   cascades, which still draw for the shaders that do not trace.
 
 use super::*;
@@ -120,7 +121,8 @@ pub(super) fn shader(src: &str) -> String {
 	const MOBY: &str = "sun_occ(i.w)";
 	assert!(src.contains(OCC) && src.contains(MOBY), "rt shadows: the level shader has no sun_occ or sun_lit");
 	let src = src.replacen(OCC, "fn sun_occ_map(p: vec3<f32>) -> f32 {", 1).replacen(MOBY, "sun_occ_moby(i.w)", 1);
-	format!("enable wgpu_ray_query;\n{}\n{}{}{}", src, RT_LEVEL, rt_fns(), RT_OCC)
+	let show = std::env::var("RAC_RT_SHADOW_SHOW").is_ok_and(|v| v == "1");
+	format!("enable wgpu_ray_query;\n{}\n{}{}{}{}", src, RT_LEVEL, rt_fns(), RT_LOOKUP, RT_OCC.replace("RT_SHOW", if show { "true" } else { "false" }))
 }
 
 /// The level shader `src` as the device runs it: `shader(src)` while the receivers trace, else unchanged.
@@ -130,7 +132,8 @@ pub(super) fn level(src: String) -> String {
 
 /// The mask pass's shader (`cs_mask`).
 fn mask_shader() -> String {
-	format!("enable wgpu_ray_query;\n{}{}", RT_MASK, rt_fns())
+	let mask = RT_MASK.replace("REACH", &format!("{REACH:.1}")).replace("SUN_DISC", &format!("{SUN_DISC:.4}")).replace("RAYS", &format!("{RAYS}u")).replace("HISTORY", &format!("{HISTORY:.3}"));
+	format!("enable wgpu_ray_query;\n{}{}{}", mask, rt_fns(), RT_LOOKUP)
 }
 
 /// The ray code the shaders share (these two and rtrays.rs's march), with this file's constants.
@@ -165,7 +168,8 @@ const RT_LEVEL: &str = r#"
 // offset, mask w | h << 16); the masks, one bit per texel (1 = casts).
 @group(0) @binding(5) var<storage, read> rt_tris: array<vec4<u32>>;
 @group(0) @binding(6) var<storage, read> rt_bits: array<u32>;
-// The shadow mask of the last frame and its camera (rtshadow.rs `mask`): per pixel (shadow, view depth) as two f16.
+// The shadow mask of the last frame and its camera (rtshadow.rs `mask`): per pixel the shadow of the world and of the moving
+// casters, and the view depth (`rt_unpack`).
 struct RtView { eye: vec4<f32>, f: vec4<f32>, r: vec4<f32>, u: vec4<f32>, size: vec4<f32>, sun: vec4<f32> };
 @group(0) @binding(7) var<uniform> rt_view: RtView;
 @group(0) @binding(8) var<storage, read> rt_mask: array<u32>;
@@ -174,35 +178,89 @@ struct RtView { eye: vec4<f32>, f: vec4<f32>, r: vec4<f32>, u: vec4<f32>, size: 
 const RT_MASK: &str = r#"
 struct RtView { eye: vec4<f32>, f: vec4<f32>, r: vec4<f32>, u: vec4<f32>, size: vec4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var depth_ms: texture_depth_multisampled_2d;
-@group(0) @binding(1) var<uniform> rt_view: RtView;
-@group(0) @binding(2) var<storage, read_write> rt_mask: array<u32>;
+@group(0) @binding(1) var<uniform> rt_cam: RtView;
+@group(0) @binding(2) var<storage, read_write> rt_out: array<u32>;
 @group(0) @binding(3) var sun_tlas: acceleration_structure;
 @group(0) @binding(4) var<storage, read> rt_tris: array<vec4<u32>>;
 @group(0) @binding(5) var<storage, read> rt_bits: array<u32>;
+// The last frame's mask and its camera, under the names the receivers read them by (`rt_mask_ch`).
+@group(0) @binding(6) var<uniform> rt_view: RtView;
+@group(0) @binding(7) var<storage, read> rt_mask: array<u32>;
 
 fn ign(x: vec2<f32>) -> f32 {
 	return fract(52.9829189 * fract(dot(x, vec2<f32>(0.06711056, 0.00583715))));
 }
 
+// One shadow ray as `rt_ray`: 0 lit, 1 a caster of the static world, 2 a moving caster (the top level's instance with custom
+// data 1, rtshadow.rs `ready`). The first hit found ends it, so a ray that both block may say either.
+fn rt_ray_kind(p: vec3<f32>, l: vec3<f32>, t0: f32) -> u32 {
+	var rq: ray_query;
+	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, 0xffu, t0, REACH, p, l));
+	while (rayQueryProceed(&rq)) {
+		if (rt_texel_casts(rayQueryGetCandidateIntersection(&rq))) {
+			rayQueryConfirmIntersection(&rq);
+		}
+	}
+	let h = rayQueryGetCommittedIntersection(&rq);
+	if (h.kind == RAY_QUERY_INTERSECTION_NONE) { return 0u; }
+	return select(1u, 2u, h.instance_custom_data == 1u);
+}
+
 // [PC] The shadow mask (rtshadow.rs): per pixel of the level pass's depth, its world point (as post.rs `view_pos`) and RAYS
-// rays over the sun's disc, turned per pixel; the sky stores no depth a receiver can match.
+// rays over the sun's disc, turned per pixel and per frame; the sky stores no depth a receiver can match.
+// The static world's share is blended into the last frame's at the same world point (`HISTORY` of it kept): 4 rays give a
+// penumbra only 5 steps, and the smallest camera motion moved pixels across them every frame, so the soft shadows far from
+// their casters shimmered. Turning the rays each frame, the blend sees many more directions over the sun's disc. The moving
+// casters' share is this frame's only (a blend would trail behind them); a ray they stop says nothing of the world, so it
+// does not count towards the world's share.
 @compute @workgroup_size(8, 8) fn cs_mask(@builtin(global_invocation_id) id: vec3<u32>) {
-	let wh = vec2<u32>(rt_view.size.xy);
+	let wh = vec2<u32>(rt_cam.size.xy);
 	if (id.x >= wh.x || id.y >= wh.y) { return; }
 	let d = textureLoad(depth_ms, vec2<i32>(id.xy), 0);
-	var m = vec2<f32>(0.0, 65504.0);
+	var m = rt_pack(0.0, 0.0, 65504.0);
 	if (d < 1.0) {
-		let n = rt_view.f.w;
-		let fa = rt_view.r.w;
+		let n = rt_cam.f.w;
+		let fa = rt_cam.r.w;
 		let z = n * fa / (fa - d * (fa - n));
-		let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(wh);
+		// Where sample 0 lies in the pixel (the standard 4x MSAA pattern), as its depth is that point's, not the middle's.
+		let uv = (vec2<f32>(id.xy) + vec2<f32>(0.375, 0.125)) / vec2<f32>(wh);
 		let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-		let p = rt_view.eye.xyz + (rt_view.f.xyz + rt_view.r.xyz * (ndc.x * rt_view.size.z) + rt_view.u.xyz * (ndc.y * rt_view.size.w)) * z;
-		m = vec2<f32>(rt_soft(p, -normalize(rt_view.sun.xyz), 0.03 + 0.004 * z, ign(vec2<f32>(id.xy)) * 6.2831853), min(z, 65000.0));
+		let p = rt_cam.eye.xyz + (rt_cam.f.xyz + rt_cam.r.xyz * (ndc.x * rt_cam.size.z) + rt_cam.u.xyz * (ndc.y * rt_cam.size.w)) * z;
+		// As `rt_soft`, the rays sorted by what stops them.
+		let l = -normalize(rt_cam.sun.xyz);
+		let a = normalize(cross(l, select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), abs(l.z) > 0.9)));
+		let b = cross(l, a);
+		let spin = fract(ign(vec2<f32>(id.xy)) + rt_cam.u.w * 0.618034) * 6.2831853;
+		var world = 0.0;
+		var known = 0.0;
+		var movers = 0.0;
+		for (var i = 0u; i < RAYS; i++) {
+			let ang = spin + f32(i) * 2.3999632;
+			let rad = SUN_DISC * sqrt((f32(i) + 0.5) / f32(RAYS));
+			let k = rt_ray_kind(p, normalize(l + (a * cos(ang) + b * sin(ang)) * rad), 0.03 + 0.004 * z);
+			if (k == 2u) {
+				movers += 1.0;
+			} else {
+				world += f32(k);
+				known += 1.0;
+			}
+		}
+		let h = rt_mask_ch(p);
+		var w = world / max(known, 1.0);
+		if (h.z >= 0.5) {
+			// The last frame's world share at p: its own pixel when that matches (no blur over frames), else the neighbours'.
+			let last = select(h.x, h.w, h.w >= 0.0);
+			w = mix(last, w, (1.0 - HISTORY) * known / f32(RAYS));
+		}
+		m = rt_pack(w, movers / f32(RAYS), min(z, 65000.0));
 	}
-	rt_mask[id.y * wh.x + id.x] = pack2x16float(m);
+	rt_out[id.y * wh.x + id.x] = m;
 }
 "#;
+
+/// The share of the last frame's static-world shadow the mask keeps at a point (`cs_mask`): about 1 / (1 - HISTORY) frames of
+/// rays are blended.
+const HISTORY: f32 = 0.9;
 
 const RT_FNS: &str = r#"
 // A candidate hit on a non-opaque caster: does its texel cast? (the uv repeats, nearest texel of level 0)
@@ -252,40 +310,76 @@ fn rt_soft(p: vec3<f32>, l: vec3<f32>, t0: f32, spin: f32) -> f32 {
 }
 "#;
 
-const RT_OCC: &str = r#"
-// The shadow mask at world point p (last frame's, re-projected with its camera): the mean over the 3x3 pixels around it whose
-// depth matches p's, or -1 when fewer than 3 do (off screen, hidden last frame, a see-through layer in front of the mask's).
-fn rt_mask_at(p: vec3<f32>) -> f32 {
-	if (rt_view.eye.w < 0.5) { return -1.0; }
-	let v = p - rt_view.eye.xyz;
-	let z = dot(v, rt_view.f.xyz);
-	if (z <= rt_view.f.w) { return -1.0; }
-	let nd = vec2<f32>(dot(v, rt_view.r.xyz) / (z * rt_view.size.z), dot(v, rt_view.u.xyz) / (z * rt_view.size.w));
-	if (any(abs(nd) >= vec2<f32>(1.0))) { return -1.0; }
-	let wh = vec2<i32>(rt_view.size.xy);
-	let c = vec2<i32>(vec2<f32>(nd.x * 0.5 + 0.5, 0.5 - nd.y * 0.5) * rt_view.size.xy);
-	let tol = 0.02 + 0.01 * z;
-	var s = 0.0;
-	var n = 0.0;
-	for (var dy = -1; dy <= 1; dy++) {
-		for (var dx = -1; dx <= 1; dx++) {
-			let q = clamp(c + vec2<i32>(dx, dy), vec2<i32>(0), wh - vec2<i32>(1));
-			let m = unpack2x16float(rt_mask[u32(q.y * wh.x + q.x)]);
-			if (abs(m.y - z) < tol) {
-				s += m.x;
-				n += 1.0;
-			}
-		}
-	}
-	return select(-1.0, s / max(n, 1.0), n >= 3.0);
+const RT_LOOKUP: &str = r#"
+// A shadow mask pixel (rtshadow.rs `cs_mask`): the static world's shadowed share (unorm8), the moving casters' (unorm8 << 8),
+// the view depth (the high f16).
+fn rt_pack(world: f32, movers: f32, z: f32) -> u32 {
+	let s = vec2<u32>(round(saturate(vec2<f32>(world, movers)) * 255.0));
+	return s.x | (s.y << 8u) | (pack2x16float(vec2<f32>(0.0, z)) & 0xffff0000u);
 }
 
+fn rt_unpack(v: u32) -> vec3<f32> {
+	return vec3<f32>(f32(v & 0xffu) / 255.0, f32((v >> 8u) & 0xffu) / 255.0, unpack2x16float(v).y);
+}
+
+// The shadow mask at world point p (last frame's, re-projected with its camera): the means of the world's and the moving
+// casters' shares over the 3x3 pixels around it whose depth matches p's, their total weight (under 0.5: none hold p; off
+// screen, hidden last frame, a see-through layer in front of the mask's) and the world share of p's own pixel (-1 when that
+// one does not match).
+// A neighbour's depth may differ from p's by the surface's depth slope on screen times its distance in pixels from p: far
+// ground seen at a low angle changes depth by more than 1% per pixel, and with a fixed tolerance its neighbours dropped in and
+// out from frame to frame, so the far shadows flickered between the mask and the hard ray. The slope on each axis is the
+// smaller of the two one-sided differences at the centre pixel (a plane gives both the same; at an object's edge the other
+// side is another object). A match counts less the nearer it is to the tolerance, so a neighbour drifting out fades out.
+fn rt_mask_ch(p: vec3<f32>) -> vec4<f32> {
+	let none = vec4<f32>(0.0, 0.0, 0.0, -1.0);
+	if (rt_view.eye.w < 0.5) { return none; }
+	let v = p - rt_view.eye.xyz;
+	let z = dot(v, rt_view.f.xyz);
+	if (z <= rt_view.f.w) { return none; }
+	let nd = vec2<f32>(dot(v, rt_view.r.xyz) / (z * rt_view.size.z), dot(v, rt_view.u.xyz) / (z * rt_view.size.w));
+	if (any(abs(nd) >= vec2<f32>(1.0))) { return none; }
+	let wh = vec2<i32>(rt_view.size.xy);
+	let px = vec2<f32>(nd.x * 0.5 + 0.5, 0.5 - nd.y * 0.5) * rt_view.size.xy;
+	// A mask pixel holds the point of its depth sample 0, at (0.375, 0.125) in the pixel (`cs_mask`): the centre pixel is the
+	// one whose sample is nearest p, and f is p's offset from that sample.
+	let c = vec2<i32>(floor(px + vec2<f32>(0.125, 0.375)));
+	let f = px - vec2<f32>(c) - vec2<f32>(0.375, 0.125);
+	var ms: array<vec3<f32>, 9>;
+	for (var i = 0; i < 9; i++) {
+		let q = clamp(c + vec2<i32>(i % 3 - 1, i / 3 - 1), vec2<i32>(0), wh - vec2<i32>(1));
+		ms[i] = rt_unpack(rt_mask[u32(q.y * wh.x + q.x)]);
+	}
+	let zc = ms[4].z;
+	let g = min(vec2<f32>(min(abs(zc - ms[3].z), abs(ms[5].z - zc)), min(abs(zc - ms[1].z), abs(ms[7].z - zc))), vec2<f32>(0.1 * z));
+	let base = 0.02 + 0.01 * z;
+	var s = vec2<f32>(0.0);
+	var n = 0.0;
+	var own = -1.0;
+	for (var i = 0; i < 9; i++) {
+		let o = abs(vec2<f32>(f32(i % 3 - 1), f32(i / 3 - 1)) - f);
+		let w = 1.0 - abs(ms[i].z - z) / (base + 1.25 * dot(g, o));
+		// The sky stores 65504, where no receiver is.
+		if (w > 0.0 && ms[i].z < 65000.0) {
+			s += ms[i].xy * w;
+			n += w;
+			if (i == 4) { own = ms[i].x; }
+		}
+	}
+	return vec4<f32>(s / max(n, 1e-4), n, own);
+}
+"#;
+
+const RT_OCC: &str = r#"
 // [PC] Ray-traced sun shadows (rtshadow.rs; rt_view.sun.w = 1 once the level's structure is built; u.sun_q.w is texfilter.wgsl's):
-// the soft shadow of the mask where it holds p, else one ray of its own.
+// the soft shadow of the mask where it holds p (the moving casters' share, and the world's over the rest), else one ray of
+// its own.
 fn sun_occ(p: vec3<f32>) -> f32 {
 	if (rt_view.sun.w < 0.5) { return sun_occ_map(p); }
-	let m = rt_mask_at(p);
-	if (m >= 0.0) { return m; }
+	let m = rt_mask_ch(p);
+	if (m.z >= 0.5) { return m.y + (1.0 - m.y) * m.x; }
+	// RAC_RT_SHADOW_SHOW=1 (dev): the receivers that trace this ray get dark stripes.
+	if (RT_SHOW && fract(dot(p, vec3<f32>(0.5))) < 0.5) { return 1.0; }
 	return rt_ray(p, -normalize(u.sun.xyz), 0.03 + 0.004 * distance(p, u.eye.xyz));
 }
 
@@ -457,9 +551,12 @@ pub(super) struct RtShadow {
 	/// RAC_RT_TUNE (dev): the settings, and when the file was last looked at.
 	tune: Tune,
 	tune_seen: Option<(std::time::Instant, Option<std::time::SystemTime>)>,
-	/// The shadow mask (f16 pairs, `MASK_CAP` pixels), the camera it was traced with as the level shaders read it (`view`,
-	/// copied from `view_next` after the frame's level pass) and as the mask pass reads it (`view_next`).
+	/// The shadow mask (`rt_pack`, `MASK_CAP` pixels), the camera it was traced with as the level shaders read it (`view`,
+	/// copied from `view_next` after the frame's level pass) and as the mask pass reads it (`view_next`); the mask pass blends
+	/// in a copy of the last frame's (`mask_last`, with `view`). `frame` turns the rays from frame to frame.
 	mask: wgpu::Buffer,
+	mask_last: wgpu::Buffer,
+	frame: u32,
 	view: wgpu::Buffer,
 	view_next: wgpu::Buffer,
 	mask_pipeline: wgpu::ComputePipeline,
@@ -515,8 +612,8 @@ impl RtShadow {
 	/// shadow mask.
 	pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> RtShadow {
 		let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor { label: Some("rt shadows"), max_instances: 2, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
-		let table = |label, size: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-		let (tris, bits, mask) = (table("rt shadow cut triangles", (2 + 2 * TRI_CAP) * 16), table("rt shadow masks", BITS_CAP * 4), table("rt shadow mask", MASK_CAP * 4));
+		let table = |label, size: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+		let (tris, bits, mask, mask_last) = (table("rt shadow cut triangles", (2 + 2 * TRI_CAP) * 16), table("rt shadow masks", BITS_CAP * 4), table("rt shadow mask", MASK_CAP * 4), table("rt shadow mask last", MASK_CAP * 4));
 		let uniform = |label, extra| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: std::mem::size_of::<RtView>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | extra, mapped_at_creation: false });
 		let (view, view_next) = (uniform("rt shadow view", wgpu::BufferUsages::empty()), uniform("rt shadow view next", wgpu::BufferUsages::COPY_SRC));
 		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt shadow mask"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt shadow mask", mask_shader().into())) });
@@ -524,7 +621,7 @@ impl RtShadow {
 		let mut enc = device.create_command_encoder(&Default::default());
 		enc.build_acceleration_structures(std::iter::empty(), std::iter::once(&tlas));
 		queue.submit([enc.finish()]);
-		RtShadow { tlas, tris, bits, blas: None, key: None, tune: Tune::default(), tune_seen: None, mask, view, view_next, mask_pipeline, mask_bind: None, movers: Default::default(), hit: None, hit_gen: 0 }
+		RtShadow { tlas, tris, bits, blas: None, key: None, tune: Tune::default(), tune_seen: None, mask, mask_last, frame: 0, view, view_next, mask_pipeline, mask_bind: None, movers: Default::default(), hit: None, hit_gen: 0 }
 	}
 
 	/// The frame's shadow mask, after the level pass (`depth` its depth, `cam` / `aspect` / `range` its camera, `dir` the light's
@@ -542,11 +639,13 @@ impl RtShadow {
 		let f = forward(cam);
 		let r = normalise(cross(f, cam.up));
 		let u = cross(r, f);
+		self.frame = (self.frame + 1) % 1024;
 		let v = RtView {
 			eye: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
 			f: [f[0], f[1], f[2], range.0],
 			r: [r[0], r[1], r[2], range.1],
-			u: [u[0], u[1], u[2], 0.0],
+			// w: the frame, which turns the mask's rays (the receivers do not read it).
+			u: [u[0], u[1], u[2], self.frame as f32],
 			size: [size.0 as f32, size.1 as f32, cam.tan_half * aspect, cam.tan_half],
 			// w: the structure is built (the receivers trace; it is, past the check above).
 			sun: [dir[0], dir[1], dir[2], 1.0],
@@ -564,11 +663,16 @@ impl RtShadow {
 					wgpu::BindGroupEntry { binding: 3, resource: self.tlas.as_binding() },
 					wgpu::BindGroupEntry { binding: 4, resource: self.tris.as_entire_binding() },
 					wgpu::BindGroupEntry { binding: 5, resource: self.bits.as_entire_binding() },
+					wgpu::BindGroupEntry { binding: 6, resource: self.view.as_entire_binding() },
+					wgpu::BindGroupEntry { binding: 7, resource: self.mask_last.as_entire_binding() },
 				],
 			});
 			self.mask_bind = Some((depth.clone(), bind));
 		}
 		let Some((_, bind)) = &self.mask_bind else { return };
+		// The last frame's mask, as its camera (`view`, not yet replaced) saw it.
+		let last = (size.0 as u64 * size.1 as u64 * 4).max(4);
+		enc.copy_buffer_to_buffer(&self.mask, 0, &self.mask_last, 0, Some(last));
 		{
 			let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rt shadow mask"), timestamp_writes: crate::viewer::passtime::cw("rt shadow mask") });
 			pass.set_pipeline(&self.mask_pipeline);

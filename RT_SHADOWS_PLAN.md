@@ -23,6 +23,17 @@ Status: phases 0-6 (moving casters, soft shadows, foliage) built and tested in g
   are static, so this is exact under camera motion. Where fewer than 3 match (off screen, newly revealed, a see-through layer
   in front) they trace one ray of their own. Vine strands are now soft shadows with no speckle, and turning the camera showed
   no holes or stale patches.
+- **Fix (2026-10-28): far soft shadows no longer flicker.** Far from their casters the soft shadows did a fast, subtle jumping
+  (Pokitaru dock), standing still and moving. Causes and fixes, all in the mask (`cs_mask`) and its lookup (`rt_mask_ch`):
+  4 rays give a penumbra only 5 steps and the smallest camera motion moved pixels across them every frame, so the rays now turn
+  each frame and the static world's share is blended with the last frame's at the same world point (`HISTORY` 0.9, about 10
+  frames; 0.8 was better than before but still showed it). The moving casters' share is kept apart (a ray they stop does not
+  count towards the world's) and is never blended, so their shadows leave no trail. The lookup's depth match now allows for
+  the surface's depth slope on screen (far ground at a low angle failed the fixed 1% and switched between the mask and the
+  hard ray) and fades a match out near its limit; the mask now builds its point where depth sample 0 lies (4x MSAA), not at
+  the pixel's middle. `movers=0` alone helped only a little. Cost (`RAC_GPU_PASSES`, Pokitaru): mask 0.38 to 0.48 ms vs 0.53,
+  level pass about the same. Dev: `RAC_RT_SHADOW_SHOW=1` stripes the receivers that still trace their own hard ray. The user
+  sees it as much better, a very faint shimmer left.
 - **Cost** (FPS overlay, uncapped): spawn 147 FPS (6.9 ms) with the mask, vs 166 (6.1 ms) one ray per fragment and 103 (9.9 ms)
   four rays per fragment; terrace 155 FPS (6.5 ms) with the mask, vs 85 (12.1 ms) four rays per fragment.
 - Dev knob: `RAC_RT_TUNE=<file>` with `cut=tfrag,tie,shrub solid=1.0` picks which casters get the texel test; the game re-reads
