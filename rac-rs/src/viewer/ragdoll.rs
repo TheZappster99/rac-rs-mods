@@ -101,11 +101,23 @@ struct Tune {
 	/// Where the clip starts and ends in the get-up (shares of `Cue::blend`): before it the limp pose settles into the clip's
 	/// first frame, after it the clip's last frame settles into the game's pose.
 	getup: [f32; 2],
+	/// The landing sounds (hero class sound, pitch): `thud` for every hard hit of the body on the floor, louder the faster it came
+	/// down, and `voice`, Ratchet's grunt on the first hard hit of a ragdoll. `RAC_RAGDOLL_DUMP=1` writes every hero class sound
+	/// of the level to `player/ragdoll_sounds/` to pick from.
+	thud: [f32; 2],
+	voice: [f32; 2],
 }
 
 /// Defaults. Second round (2026-10-26, "a bit spastic when hitting the ground"): more damping, a firmer drive and narrower
 /// Loose limits than the first (damp 0.4, adamp 1.5, drive 0.05 / 0.5, limits 0.6 / 1.0 / 1.6, 8 substeps).
-const TUNE: Tune = Tune { gravity: 24.0, substeps: 10, damp: 0.8, adamp: 4.0, friction: 0.3, drive: [0.02, 0.2], limits: [0.6, 0.85, 1.4], tether: 2.0, bounce: [0.0, 0.35, 0.6], hitpush: 2.5, hitlift: 5.0, hitleash: 6.0, crouch: [5.0, 14.0], kipup: [14.0, 0.0], getup: [0.25, 0.85] };
+const TUNE: Tune = Tune { gravity: 24.0, substeps: 10, damp: 0.8, adamp: 4.0, friction: 0.3, drive: [0.02, 0.2], limits: [0.6, 0.85, 1.4], tether: 2.0, bounce: [0.0, 0.35, 0.6], hitpush: 2.5, hitlift: 5.0, hitleash: 6.0, crouch: [5.0, 14.0], kipup: [14.0, 0.0], getup: [0.25, 0.85], thud: [30.0, 1.0], voice: [33.0, 1.0] };
+
+/// Landing sounds: the body's centre coming down onto the floor faster than `SLAM_MIN` (units/s) thuds, at full volume from
+/// `SLAM_FULL`; the grunt needs `VOICE_MIN`. A bounce lands again a few fields later: at most one thud per `SLAM_GAP` fields.
+const SLAM_MIN: f32 = 3.0;
+const SLAM_FULL: f32 = 16.0;
+const VOICE_MIN: f32 = 6.0;
+const SLAM_GAP: u32 = 6;
 
 /// See `capsule_ii`.
 const INERTIA: f32 = 2.5;
@@ -251,6 +263,8 @@ fn tune() -> Tune {
 			"crouch" if v.len() >= 2 => t.crouch = [v[0], v[1]],
 			"kipup" if v.len() >= 2 => t.kipup = [v[0], v[1]],
 			"getup" if v.len() >= 2 => t.getup = [v[0].clamp(0.0, 1.0), v[1].clamp(v[0], 1.0)],
+			"thud" => t.thud = [x, v.get(1).copied().unwrap_or(t.thud[1])],
+			"voice" => t.voice = [x, v.get(1).copied().unwrap_or(t.voice[1])],
 			_ => {}
 		}
 	}
@@ -365,6 +379,21 @@ pub(super) struct Ragdoll {
 	getup_planned: bool,
 	/// The joints drawn last (model space): a hit during a get-up clip starts the body again from them.
 	last_out: Vec<M34>,
+	/// This field's hardest hit on the floor (speed into it), fields since the last thud, whether this ragdoll grunted yet,
+	/// and the sounds for the audio phase (`take_sounds`).
+	slam: Option<f32>,
+	since_thud: u32,
+	voiced: bool,
+	sounds: Vec<Sound>,
+	/// The field this ragdoll's game Ratchet was first on the ground (the `slam` log line's timing).
+	ground_at: Option<u32>,
+}
+
+/// A landing sound for the audio phase (viewer/handler/frame_audio.rs): a hero class sound, volume 0..1.
+pub(super) struct Sound {
+	pub cs: usize,
+	pub volume: f32,
+	pub pitch: f32,
 }
 
 impl Ragdoll {
@@ -404,6 +433,12 @@ impl Ragdoll {
 			return None;
 		}
 		let anim: Vec<M34> = (0..HERO_JOINTS).map(|j| a.joint_world(mats, j)).collect();
+		if cue.id != self.id {
+			self.ground_at = None;
+		}
+		if cue.phase != Phase::Fall && self.ground_at.is_none() {
+			self.ground_at = Some(field);
+		}
 		if !self.active || cue.id != self.id {
 			self.start(&anim, place, field, cue);
 		} else if ticked && !cue.frozen && self.getup.is_none() {
@@ -412,6 +447,7 @@ impl Ragdoll {
 			for _ in 0..steps {
 				self.step(dt, &anim, place, cue, world);
 			}
+			self.landing_sounds(steps, field, cue.phase);
 			if crate::retail::ragdoll::log_on() {
 				// A joint pulled apart (the pivot as each of its two bodies sees it): a stretched limb on screen.
 				let gap = |jt: &Joint| length(sub(add(self.bodies[jt.p].x, qrot(self.bodies[jt.p].q, jt.rp)), add(self.bodies[jt.c].x, qrot(self.bodies[jt.c].q, jt.rc))));
@@ -464,6 +500,39 @@ impl Ragdoll {
 		let logic = mats.to_vec();
 		self.pose(mats, &anim, a, place, cue);
 		Some(logic)
+	}
+
+	/// After the field's steps: the field's hardest hit on the floor becomes a thud (Impact sound setting) and, the first hard one of
+	/// this ragdoll, Ratchet's grunt (Ratchet voice setting).
+	fn landing_sounds(&mut self, steps: u32, field: u32, phase: Phase) {
+		self.since_thud = self.since_thud.saturating_add(steps);
+		let Some(speed) = self.slam.take() else { return };
+		// Not while he gets up: the plain blend still steps the body, and the log had thuds at the end of get-ups (speed 5-11).
+		if speed < SLAM_MIN || self.since_thud < SLAM_GAP || phase == Phase::GetUp {
+			return;
+		}
+		self.since_thud = 0;
+		let t = tune();
+		let on = |key| crate::plugins::value_at_start(crate::retail::ragdoll::ID, key) == 1;
+		let k = ((speed - SLAM_MIN) / (SLAM_FULL - SLAM_MIN)).clamp(0.0, 1.0);
+		if on("thud") {
+			self.sounds.push(Sound { cs: t.thud[0] as usize, volume: 0.3 + 0.7 * k, pitch: t.thud[1] });
+		}
+		let voice = !self.voiced && speed >= VOICE_MIN && on("voice");
+		if voice {
+			self.voiced = true;
+			self.sounds.push(Sound { cs: t.voice[0] as usize, volume: 1.0, pitch: t.voice[1] });
+		}
+		if crate::retail::ragdoll::log_on() {
+			// How long after the game's Ratchet landed (negative: before it): the first test heard the thud "slightly delayed".
+			let after = self.ground_at.map_or("not landed".to_string(), |g| format!("{} fields after the game landed", field.wrapping_sub(g) as i32));
+			eprintln!("ragdoll: slam field {field} speed {speed:.1} thud cs{} volume {:.2}{}, {after}", t.thud[0], 0.3 + 0.7 * k, if voice { format!(", voice cs{}", t.voice[0]) } else { String::new() });
+		}
+	}
+
+	/// The landing sounds since the last call (the audio phase plays them).
+	pub(super) fn take_sounds(&mut self) -> Vec<Sound> {
+		std::mem::take(&mut self.sounds)
 	}
 
 	fn follow_cam(&mut self, target: V3, body: Option<V3>) {
@@ -581,7 +650,10 @@ impl Ragdoll {
 		if cue.id != self.id {
 			self.getup = None;
 			self.getup_planned = false;
+			self.voiced = false;
 		}
+		self.slam = None;
+		self.since_thud = SLAM_GAP;
 		self.id = cue.id;
 		self.flop = cue.flop;
 		self.active = true;
@@ -776,10 +848,14 @@ impl Ragdoll {
 			// down faster than `BODY_BOUNCE_MIN`) sends the centre back up at `bounce` x that speed, with the spin a push at the
 			// contact gives (a tilted landing tips him over).
 			let hits: Vec<&(usize, V3, V3, f32)> = contacts.iter().filter(|c| c.3 < -BOUNCE_MIN).collect();
-			if bounce > 0.0 && !hits.is_empty() {
+			if !hits.is_empty() {
 				let n = normalize(hits.iter().fold([0.0; 3], |a, c| add(a, c.2)));
 				let vn0 = dot(vc0, n);
-				if vn0 < -BODY_BOUNCE_MIN {
+				// The landing sounds go by the same speed (the body's centre into the floor, not a limb's slap).
+				if -vn0 > self.slam.unwrap_or(0.0) {
+					self.slam = Some(-vn0);
+				}
+				if bounce > 0.0 && vn0 < -BODY_BOUNCE_MIN {
 					let gain = -bounce * vn0 - dot(com(&self.bodies, mass, |b| b.v), n);
 					if gain > 0.0 {
 						let dv = scale(n, gain);
@@ -947,6 +1023,38 @@ impl Ragdoll {
 }
 
 /// The plain get-up blend (0 = limp, 1 = the game's pose): the whole of a free get-up, `PLAIN_SHARE` of the others.
+/// `RAC_RAGDOLL_DUMP=1`: every hero class sound of each level loaded, as `player/ragdoll_sounds/<level>_cs<n>.wav`, to pick the
+/// landing sounds by ear (`thud=` / `voice=` in `RAC_RAGDOLL_TUNE`). Mono, at the clip's own rate.
+pub(super) fn dump_sounds(level: usize, sfx: &super::sfx::Sfx) {
+	if !std::env::var("RAC_RAGDOLL_DUMP").is_ok_and(|v| v == "1") {
+		return;
+	}
+	let dir = crate::retail::memcard::player_dir().join("ragdoll_sounds");
+	if std::fs::create_dir_all(&dir).is_err() {
+		return;
+	}
+	let mut ids: Vec<_> = sfx.ev.hero_cs.iter().collect();
+	ids.sort_by_key(|(cs, _)| **cs);
+	for (cs, c) in ids {
+		let Some(clip) = sfx.clips.get(c.sound).and_then(|x| x.as_ref()) else { continue };
+		let data = clip.pcm.len() as u32 * 2;
+		let mut w = Vec::with_capacity(44 + data as usize);
+		w.extend_from_slice(b"RIFF");
+		w.extend_from_slice(&(36 + data).to_le_bytes());
+		w.extend_from_slice(b"WAVEfmt ");
+		for x in [16u32, 1 | 1 << 16, clip.rate, clip.rate * 2, 2 | 16 << 16] {
+			w.extend_from_slice(&x.to_le_bytes());
+		}
+		w.extend_from_slice(b"data");
+		w.extend_from_slice(&data.to_le_bytes());
+		for s in clip.pcm.iter() {
+			w.extend_from_slice(&s.to_le_bytes());
+		}
+		let _ = std::fs::write(dir.join(format!("{level:02}_cs{cs:02}_bank{}{}.wav", c.sound, if clip.loop_start.is_some() { "_loop" } else { "" })), w);
+	}
+	eprintln!("ragdoll: dumped {} hero sounds of level {level} to {}", sfx.ev.hero_cs.len(), dir.display());
+}
+
 fn plain_blend(cue: Cue) -> f32 {
 	if cue.phase != Phase::GetUp {
 		return 0.0;

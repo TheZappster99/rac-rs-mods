@@ -102,7 +102,7 @@ impl Plugin for RagdollRatchet {
 		"Ragdoll Ratchet"
 	}
 	fn description(&self) -> &'static str {
-		"Ratchet goes limp and flops when he falls from a big height without the Heli-Pack, the Thruster-Pack or a wrench slam. Press L3 (Left Shift) in the air to go limp at once. Enemy hits can knock him down too. You have no control until he gets up. Knockdown guard stops a crowd of enemies keeping him down: a hit knocks him down only briefly, you can move again as he gets up, and for a moment after that hits cannot knock him down again. Built into the game."
+		"Ratchet goes limp and flops when he falls from a big height without the Heli-Pack, the Thruster-Pack or a wrench slam. Press L3 (Left Shift) in the air to go limp at once. Enemy hits can knock him down too. You have no control until he gets up. Knockdown guard stops a crowd of enemies keeping him down: a hit knocks him down only briefly, you can move again as he gets up, and for a moment after that hits cannot knock him down again. He grunts when he hits the ground hard (Impact sound adds a thud). Built into the game."
 	}
 	fn env_force(&self) -> Option<&'static str> {
 		Some("RAC_RAGDOLL")
@@ -117,6 +117,8 @@ impl Plugin for RagdollRatchet {
 			Setting { id: "hits", name: "Enemy hits", values: &["Off", "On"], default: 1 },
 			Setting { id: "guard", name: "Knockdown guard", values: &["Off", "On"], default: 1 },
 			Setting { id: "camera", name: "Camera follow", values: &["Off", "On"], default: 1 },
+			Setting { id: "thud", name: "Impact sound", values: &["Off", "On"], default: 0 },
+			Setting { id: "voice", name: "Ratchet voice", values: &["Off", "On"], default: 1 },
 		]
 	}
 	fn pre_field(&self, m: &mut ee_oracle::Machine) {

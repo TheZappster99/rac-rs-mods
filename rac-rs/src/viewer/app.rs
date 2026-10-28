@@ -992,6 +992,10 @@ crate::loadlog::say(|| "host: hud art done".into());
 			}
 crate::texpack::extra_hd::apply_fx(&l, &mut fx_textures, front); crate::loadlog::say(|| "host: fx textures done".into());
 			let sfx = if front { global_sfx(&mut disc) } else { load_sfx(&l) };
+			// Ragdoll Ratchet's sound dump (viewer/ragdoll.rs): inert unless RAC_RAGDOLL_DUMP=1.
+			if !front {
+				super::ragdoll::dump_sounds(l.id, &sfx);
+			}
 			if front {
 				// Logo and the five Press Start captions after the HUD art (slot = 1 + texture index).
 				let mut slot = |t: Texture| {

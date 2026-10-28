@@ -1,7 +1,7 @@
 # Ragdoll Ratchet: plan
 
-Status (2026-10-26, end of the first session): phases 0-4 done and tuned. The player tested it on Veldin and approved the feel
-("perfect settings"). **Not committed yet** (branch `mods-migration`, F: folder). Next: phase 6, enemy hits.
+Status (2026-10-27): phases 0-6 built, tuned and committed (branch `mods-migration`, F: folder); the get-up clips, the
+knockdown guard and the landing grunt are approved. Still open: Clank left behind, and the untested items below.
 
 ## Progress so far (read this first when picking it up)
 
@@ -110,6 +110,25 @@ Status (2026-10-26, end of the first session): phases 0-4 done and tuned. The pl
     backwards from frame ~13 it is a flip from his back up to his feet (a kip-up).
   - seq 22 ends in the same low hunch as seq 12 (a landing). seqs 59-61 / 100 / 101 are swimming; 150 / 153 have all-zero
     frames (hidden / scaled away), not poses.
+- **Landing sounds** (settings `thud` Impact sound and `voice` Ratchet voice, Off / On, default On; built 2026-10-27, not tested
+  in game yet): the player asked for a thud when the limp body hits the ground and Ratchet grunting or screaming. Retail plays
+  nothing for the limp body, so `viewer/ragdoll.rs` picks the field's hardest hit (the body's centre speed into the floor, the
+  same speed as the whole-body bounce) and `landing_sounds` turns it into a thud from `SLAM_MIN` (3 units/s; full volume at
+  `SLAM_FULL` 16; at most one per `SLAM_GAP` 6 fields, so a bounce thuds again, quieter) and, on the first hit over `VOICE_MIN`
+  (6) of each ragdoll, a grunt. `frame_audio.rs` plays them at the body with the level's hero class sounds (works in retail
+  mode). Defaults: thud = hero cs30 (the landing) at pitch 0.8, voice = cs33 (the hurt grunt). Tune live with `thud=<cs>,<pitch>`
+  and `voice=<cs>,<pitch>` in `RAC_RAGDOLL_TUNE`; `RAC_RAGDOLL_DUMP=1` writes every hero class sound of each level loaded to
+  `player/ragdoll_sounds/<level>_cs<n>_bank<b>.wav` to pick by ear (cs9 is the death cry, missing on Novalis). Log line:
+  `ragdoll: slam`. To watch: an enemy hit already makes retail play the hurt grunt at the hit, so a thrown body grunts twice
+  (a different `voice` clip, or no voice on hit ragdolls, if that sounds wrong).
+  First test (2026-10-27): the thuds sounded "like gunshots or explosions in the distance" and "slightly delayed". They were
+  played at the body through the def's falloff and the reverb send, pitched down 0.8; now flat, dry and at pitch 1.0 like retail's
+  own hero cues. The clip itself is not late (cs30: 211 ms, peak at 10 ms), and the voice goes straight to the mixer like
+  retail's sounds. The `slam` line now says how many fields after the game's Ratchet landed it came, to tell whether the body
+  lands later than him. Thud candidates by measurement (short and low): cs37 (300 ms), cs16 (357 ms), cs4 (535 ms), cs31.
+  Second test: "Grunts are good, but the thud still sounds unnatural". Offered other game clips or a synthesised thud; the
+  player chose no thud: Impact sound now defaults to Off (kept as a setting). The grunt (cs33) is approved. Thuds no longer
+  play during the get-up (the log had two at the end of get-ups, from the plain blend still stepping the body).
 - Settings are read at start-up only (built-in mods rule): change them in the launcher or `mods/settings.json`, then restart.
 
 **Testing it:** `$env:RAC_RAGDOLL = "1"; $env:RAC_RAGDOLL_LOG = "1"; .\Play.cmd` (PowerShell, in the F: folder). The log
@@ -282,7 +301,7 @@ display frame, so a pause freezes it and a cached hero pose stays equal to a fre
 2. **Limp body**: bodies, joints, collision, tether, pose. Done.
 3. **Get-up blend.** Done (plain blend).
 4. **Tuning** in game. Done (approved defaults above). Not done: wobbly ears and tail, sliding on slopes.
-5. **Polish (optional)**: a retail get-up clip (done and approved 2026-10-27), an impact sound (not done).
+5. **Polish (optional)**: a retail get-up clip (done and approved 2026-10-27), landing thud and grunt (built 2026-10-27, not tested).
 6. **Enemy hits knock him down** (requested 2026-10-26): the hit reaction (state 0x16, health going down) starts a ragdoll too,
    with the push of the hit (retail's knock-back velocity) on the body; a setting to switch it on. A hit while already limp
    pushes the body again. Notes for it: the worker sees the hit as state 0x16 (group 7) and health dropping (`mode` log lines);

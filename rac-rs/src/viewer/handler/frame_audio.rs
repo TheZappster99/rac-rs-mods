@@ -28,6 +28,16 @@ impl App {
 				}
 				self.scene_voice = scene_id.map(|id| (id, self.scenes.get(&id).and_then(|(_, c)| c.as_ref()).map(|c| a.play(c, 1.0, 0.0))));
 			}
+			// Ragdoll Ratchet's landing thud and grunt (viewer/ragdoll.rs): retail plays nothing for the limp body, so these are ours
+			// in retail mode too, the level's own hero class sounds. Flat and dry like retail's hero cues: played at the body through
+			// the def's falloff and the reverb send, pitched down 0.8, the thud sounded like a gunshot or a far-off explosion (first
+			// test 2026-10-27).
+			for s in self.ragdoll.take_sounds() {
+				let Some(c) = self.sfx.ev.hero_cs.get(&s.cs) else { continue };
+				let Some(clip) = self.sfx.clips.get(c.sound).and_then(|x| x.as_ref()) else { continue };
+				let dry = audio::Clip { reverb: false, ..clip.clone() };
+				a.play_with(&dry, c.volume * s.volume, 0.0, s.pitch, true);
+			}
 			for (clip, volume, pan, shift, privileged) in sounds {
 				if let Some(c) = clip.and_then(|i| self.sfx.clips.get(i)).and_then(|c| c.as_ref()) {
 					a.play_with(c, volume, pan, sound::pitch_ratio(shift), privileged);
