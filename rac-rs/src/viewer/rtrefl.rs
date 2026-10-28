@@ -15,6 +15,11 @@
 //!
 //! Phase 4 (`rt_water`): a traced hit the picture shows (on screen, at the picture's depth there) takes the picture's colour, so
 //! it carries the sun, the shadows and the fog; the moving things are traced too and show where the picture has them.
+//!
+//! Phase 5 (Balanced and up): every water pixel off the mirrored planes traces, and its hit wins over the screen-space one (which
+//! stays where the ray finds nothing within reach); a static-world hit off screen gets the sun's shadow (one ray to the light);
+//! a moving thing off screen gets its texture's mean colour (rtmovers.rs `tex_table`); lava, sludge and mud trace their gloss.
+//! Picture hits are moved by the ripples as the screen-space ones are.
 
 use super::*;
 
@@ -23,9 +28,10 @@ use super::*;
 /// RTX 3080 Ti at 1440p.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Quality {
-	/// Default: traces only where the screen-space reflection and the planar mirror found nothing, at a quarter of the pixels.
+	/// Default: traces only where the screen-space reflection and the planar mirror found nothing.
 	Performance,
-	/// Every water pixel off the mirrored planes at half size, a sun shadow ray at the hit, chrome and glass.
+	/// Every water pixel off the mirrored planes, a sun shadow ray at the hit, moving things off screen, the lava, sludge and mud
+	/// gloss (and chrome and glass, phase 6).
 	Balanced,
 	/// Full size, 2 rays on rough surfaces, the mirrored planes too (the planar mirror's redraw off).
 	Ultra,
@@ -56,9 +62,15 @@ pub(super) fn announce(traces: bool) {
 		return;
 	}
 	match traces {
-		true => eprintln!("rt reflections: on, quality {:?} (phase 4: water only)", quality()),
+		true => eprintln!("rt reflections: on, quality {:?} (phase 5: {})", quality(), if movers_shaded() { "water, lava, sludge, mud" } else { "water" }),
 		false => eprintln!("rt reflections: switched on, but the adapter has no ray queries on Vulkan: off"),
 	}
+}
+
+/// Reflections at Balanced and up: the whole water traces, with the sun's shadow at a hit and the moving things shaded off
+/// screen (rtmovers.rs keeps their texture table for it).
+pub(super) fn movers_shaded() -> bool {
+	wanted() && quality() != Quality::Performance
 }
 
 /// Dev only: RAC_POST_VIEW=rtrefl shows what the camera's own view rays hit, traced and shaded as reflections will be (`Debug`).
@@ -67,25 +79,39 @@ pub(super) fn debug_view() -> bool {
 	*V.get_or_init(|| std::env::var("RAC_POST_VIEW").is_ok_and(|v| v == "rtrefl"))
 }
 
-/// The hit data's bindings (rtshadow.rs `Hit`) in `group` from binding `base` on (7 bindings), and the bindless texture array as
-/// group `tex_group` (bindless.rs, its layout), with the shading of a static-world hit.
+/// The hit data's bindings (rtshadow.rs `Hit`, then the movers' texture table, rtmovers.rs `tex_table`) in `group` from binding
+/// `base` on (`HIT_BINDINGS`), and the bindless texture array as group `tex_group` (bindless.rs, its layout), with the shading of
+/// a hit.
 fn hit_wgsl(group: u32, base: u32, tex_group: u32) -> String {
 	let mut s = String::new();
-	for (k, decl) in ["var<storage, read> rt_idx: array<u32>", "var<storage, read> rt_tex: array<u32>", "var<uniform> rt_geo: array<vec4<u32>, 8>", "var<storage, read> rt_v0: array<f32>", "var<storage, read> rt_v1: array<f32>", "var<storage, read> rt_v2: array<f32>", "var<storage, read> rt_v3: array<f32>"].iter().enumerate() {
+	for (k, decl) in ["var<storage, read> rt_idx: array<u32>", "var<storage, read> rt_tex: array<u32>", "var<uniform> rt_geo: array<vec4<u32>, 8>", "var<storage, read> rt_v0: array<f32>", "var<storage, read> rt_v1: array<f32>", "var<storage, read> rt_v2: array<f32>", "var<storage, read> rt_v3: array<f32>", "var<storage, read> rt_mtex: array<u32>"].iter().enumerate() {
 		s += &format!("@group({group}) @binding({}) {decl};\n", base + k as u32);
 	}
 	s += &format!("@group({tex_group}) @binding(0) var texs: binding_array<texture_2d<f32>, {}>;\n@group({tex_group}) @binding(1) var samp: sampler;\n", super::bindless::TEX_CAP);
 	s + &RT_HIT.replace("TEX_LAST", &format!("{}u", super::bindless::TEX_CAP - 1))
 }
 
-/// The hit data's bind group entries for `hit_wgsl(base)`.
-fn hit_entries(h: &super::rtshadow::Hit, base: u32) -> [wgpu::BindGroupEntry<'_>; 7] {
-	let bufs = [&h.idx, &h.tex, &h.geo, &h.verts[0], &h.verts[1], &h.verts[2], &h.verts[3]];
+/// Bindings `hit_wgsl` takes.
+const HIT_BINDINGS: usize = 8;
+
+/// The hit data's bind group entries for `hit_wgsl(base)`; `movers`: the movers' texture table (or a stand-in before there is one).
+fn hit_entries<'a>(h: &'a super::rtshadow::Hit, movers: &'a wgpu::Buffer, base: u32) -> [wgpu::BindGroupEntry<'a>; HIT_BINDINGS] {
+	let bufs = [&h.idx, &h.tex, &h.geo, &h.verts[0], &h.verts[1], &h.verts[2], &h.verts[3], movers];
 	std::array::from_fn(|k| wgpu::BindGroupEntry { binding: base + k as u32, resource: bufs[k].as_entire_binding() })
 }
 
+/// The movers' texture table of `rt` and its generation, else `none` (a stand-in: Performance, or nothing has moved near yet).
+fn movers_tex<'a>(rt: &'a super::rtshadow::RtShadow, none: &'a wgpu::Buffer) -> (&'a wgpu::Buffer, u64) {
+	rt.movers_tex().unwrap_or((none, 0))
+}
+
+/// The stand-in movers' texture table: the 4 geometry starts, all 0.
+fn movers_none(device: &wgpu::Device) -> wgpu::Buffer {
+	device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers textures none"), size: 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })
+}
+
 /// The hit data's layout entries for `hit_wgsl(base)`.
-fn hit_layout(base: u32, visibility: wgpu::ShaderStages) -> [wgpu::BindGroupLayoutEntry; 7] {
+fn hit_layout(base: u32, visibility: wgpu::ShaderStages) -> [wgpu::BindGroupLayoutEntry; HIT_BINDINGS] {
 	let storage = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None };
 	let uniform = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None };
 	std::array::from_fn(|k| wgpu::BindGroupLayoutEntry { binding: base + k as u32, visibility, ty: if k == 2 { uniform } else { storage }, count: None })
@@ -109,8 +135,9 @@ fn rt_vpos(src: u32, b: u32) -> vec3<f32> {
 
 // [PC] Ray-traced reflections (rtrefl.rs): the colour a ray sees where it hits triangle `prim` of geometry `geo` of the static world
 // at barycentrics `bc`, `foot` world units per pixel there: texel x baked vertex colour as the level shader's `fs` draws the world
-// (no sun, no fog). The mip is the one the footprint covers, from the triangle's own texels per world unit.
-fn rt_hit_colour(geo: u32, prim: u32, bc: vec2<f32>, foot: f32) -> vec3<f32> {
+// (no fog), under a sun shadow of strength `shadow` taken as its `sun_baked` takes it (by how lit the baked colour is: a painted
+// shadow takes none). The mip is the one the footprint covers, from the triangle's own texels per world unit.
+fn rt_hit_colour(geo: u32, prim: u32, bc: vec2<f32>, foot: f32, shadow: f32) -> vec3<f32> {
 	let g = rt_geo[min(geo, 7u)];
 	let first = g.x + prim * 3u;
 	let bw = array<f32, 3>(1.0 - bc.x - bc.y, bc.x, bc.y);
@@ -134,7 +161,18 @@ fn rt_hit_colour(geo: u32, prim: u32, bc: vec2<f32>, foot: f32) -> vec3<f32> {
 	let per_unit = sqrt(texels / max(world, 1e-8));
 	let lod = log2(max(foot * per_unit, 1.0));
 	let t = textureSampleLevel(texs[slot], samp, uv, lod);
-	return t.rgb * min(c, vec3<f32>(255.0 / 128.0));
+	let shade = min(c, vec3<f32>(255.0 / 128.0));
+	let lum = dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722));
+	return t.rgb * shade * (1.0 - shadow * smoothstep(0.3, 0.8, lum));
+}
+
+// [PC] Ray-traced reflections (rtrefl.rs, Balanced and up): the colour of a moving thing a ray hit (triangle `prim` of geometry `geo`
+// of the movers' structure; rtmovers.rs `tex_table`: the geometries' starts, then each triangle's texture slot): its texture's
+// mean (the last mip) under a plain light. Their poses and lighting rig are not at hand, and a flat colour is enough for
+// something only seen in a reflection and off screen.
+fn rt_mover_colour(geo: u32, prim: u32) -> vec3<f32> {
+	let slot = min(rt_mtex[rt_mtex[min(geo, 3u)] + prim], TEX_LAST);
+	return textureSampleLevel(texs[slot], samp, vec2<f32>(0.5), 16.0).rgb * 0.8;
 }
 "#;
 
@@ -166,7 +204,7 @@ struct DbgU { eye: vec4<f32>, f: vec4<f32>, r: vec4<f32>, u: vec4<f32>, size: ve
 	var col = du.sky.rgb;
 	if (h.kind != RAY_QUERY_INTERSECTION_NONE) {
 		if (h.instance_custom_data == 0u) {
-			col = rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, h.t * du.size.z);
+			col = rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, h.t * du.size.z, 0.0);
 		} else {
 			col = vec3<f32>(0.6, 0.15, 0.6);
 		}
@@ -201,8 +239,10 @@ pub(super) struct Debug {
 	ubuf: wgpu::Buffer,
 	layout: wgpu::BindGroupLayout,
 	pipeline: wgpu::ComputePipeline,
-	/// The bind group, for (post targets' generation, structure's hit generation).
-	bind: Option<((u64, u64), wgpu::BindGroup)>,
+	/// The stand-in movers' texture table (`movers_tex`).
+	none: wgpu::Buffer,
+	/// The bind group, for (post targets' generation, structure's hit generation, movers' texture table's generation).
+	bind: Option<((u64, u64, u64), wgpu::BindGroup)>,
 }
 
 impl Debug {
@@ -225,7 +265,7 @@ impl Debug {
 		let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("rt refl debug"), layout: Some(&pl), module: &module, entry_point: Some("cs_debug"), compilation_options: Default::default(), cache: None });
 		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt refl debug"), size: std::mem::size_of::<DbgU>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		eprintln!("rt reflections: dev view RAC_POST_VIEW=rtrefl (the camera's rays traced and shaded)");
-		Debug { ubuf, layout, pipeline, bind: None }
+		Debug { ubuf, layout, pipeline, none: movers_none(device), bind: None }
 	}
 
 	/// After the sun rays and before the composite: the view rays of `cam` / `aspect` into post.rs's rays target. Nothing until the
@@ -247,13 +287,14 @@ impl Debug {
 			sky: [0.35, 0.5, 0.7, 0.0],
 		};
 		queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&v));
-		if self.bind.as_ref().is_none_or(|b| b.0 != (post_gen, hit_gen)) {
+		let (mtex, mgen) = movers_tex(rt, &self.none);
+		if self.bind.as_ref().is_none_or(|b| b.0 != (post_gen, hit_gen, mgen)) {
 			// trace_entries are bindings 3..5 of the mask pass's layout; here the structure is 2 and the alpha tables 3 and 4.
 			let trace = rt.trace_entries().map(|e| wgpu::BindGroupEntry { binding: e.binding - 1, resource: e.resource });
 			let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: self.ubuf.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&rays[1]) }];
 			entries.extend(trace);
-			entries.extend(hit_entries(hit, 5));
-			self.bind = Some(((post_gen, hit_gen), device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("rt refl debug"), layout: &self.layout, entries: &entries })));
+			entries.extend(hit_entries(hit, mtex, 5));
+			self.bind = Some(((post_gen, hit_gen, mgen), device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("rt refl debug"), layout: &self.layout, entries: &entries })));
 		}
 		let Some((_, bind)) = &self.bind else { return };
 		let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rt refl debug"), timestamp_writes: crate::viewer::passtime::cw("rt refl debug") });
@@ -284,15 +325,26 @@ fn rt_on_mirror(pf: vec3<f32>, gz: f32) -> bool {
 	return abs(pf.z - w.mirror.x) < 0.4 || (w.mirror2.z > 1.5 && abs(pf.z - w.mirror2.x) < 0.4) || (w.mirror2.z > 2.5 && abs(pf.z - w.mirror2.y) < 0.4);
 }
 
-// [PC] Ray-traced reflections (rtrefl.rs `Water`): where the screen-space march found nothing sure (`ssr` < 1) and no mirrored
-// plane lies under the pixel, the reflected ray `r` from `o` traced through the static world and the moving things; `fallback`,
-// the far-air guess, becomes what it hits (linear light, far hits fading back into the guess). A miss keeps the guess.
-// Phase 4: a hit the picture shows (on screen, not hidden behind something nearer: its depth matches the picture's there) takes
-// the picture's colour, softened as the screen-space reflection softens it, so it has the sun, the shadows and the fog the
-// picture has; a hit off screen or hidden takes `rt_hit_colour` (the static world) or keeps the guess (a moving thing).
-// `dist`: the eye's distance to the surface (the footprint at the hit grows with the whole path); `jit`: the pixel's dither.
-fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<f32>, gz: f32, dist: f32, jit: f32) -> vec3<f32> {
-	if (RT_FORCE < 0.5 && (ssr > 0.99 || rt_on_mirror(pf, gz))) { return fallback; }
+// [PC] Ray-traced reflections (rtrefl.rs, Balanced and up: RT_BALANCED): the sun's shadow at a traced hit `q` of the static
+// world, `along` the whole path from the eye: one ray to the key light (static world and moving things), at the strength the
+// level shader's shadows take (sunshadow.rs `strength`, here from the key light's glint, waterfx/passes.rs: both ramp with the
+// light's brightness from 0.1, the glint over 0.5 and the shadow over 0.4; and the shadow fades as the light nears the horizon).
+fn rt_sun_shadow(q: vec3<f32>, along: f32) -> f32 {
+	if (RT_BALANCED < 0.5 || w.sun.w <= 0.0) { return 0.0; }
+	let strength = RT_STRENGTH * clamp(w.sun.w / RT_GLINT * 1.25, 0.0, 1.0) * clamp(w.sun.z / 0.15, 0.0, 1.0);
+	return strength * rt_ray(q, w.sun.xyz, 0.03 + 0.004 * along);
+}
+
+// [PC] Ray-traced reflections (rtrefl.rs): the reflected ray `r` from `o` traced through the static world and the moving things,
+// up to RT_REACH: (colour in linear light, how much of it the trace decided). A miss keeps `fallback` (decided 0).
+// A hit the picture shows (on screen, not hidden behind something nearer: its depth matches the picture's there) takes the
+// picture's colour, softened as the screen-space reflection softens it and moved by the ripples as it is (`kb` x the hit's
+// distance, up to 4), so it has the sun, the shadows and the fog the picture has. A hit off screen or hidden is shaded: the
+// static world by `rt_hit_colour` (with the sun's shadow from Balanced on), a moving thing by its texture's mean from Balanced
+// on (at Performance it keeps `fallback`). Far hits fade back into `fallback`. `rough` widens the softening and the texture
+// footprint (water 1; the gloss of lava, sludge and mud more); `dist`: the eye's distance to the surface (the footprint at the
+// hit grows with the whole path); `jit`: the pixel's dither.
+fn rt_trace(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, dist: f32, rough: f32, kb: vec2<f32>, jit: f32) -> vec4<f32> {
 	var rq: ray_query;
 	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_NONE, 0xffu, 0.05, RT_REACH, o, r));
 	while (rayQueryProceed(&rq)) {
@@ -301,23 +353,48 @@ fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<
 		}
 	}
 	let h = rayQueryGetCommittedIntersection(&rq);
-	if (h.kind == RAY_QUERY_INTERSECTION_NONE) { return rt_shown(fallback, vec3<f32>(0.0, 0.2, 1.0)); }
+	if (h.kind == RAY_QUERY_INTERSECTION_NONE) { return vec4<f32>(rt_shown(fallback, vec3<f32>(0.0, 0.2, 1.0)), 0.0); }
 	// How much of the hit the picture shows: on screen, at the picture's depth there (the edges fade as the screen-space ones do).
-	let s = project(o + r * h.t);
+	let q = o + r * h.t;
+	let s = project(q);
 	var seen = 0.0;
 	if (on_screen(s) && abs(s.z - scene_z(s.xy)) < 0.05 + 0.02 * s.z) {
 		seen = edge_fade(s.xy);
 	}
 	var col = fallback;
-	if (h.instance_custom_data == 0u) {
-		let pix = 2.0 * w.proj.y * w.size.w;
-		col = to_linear(rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix));
+	var known = seen;
+	if (seen < 0.999) {
+		if (h.instance_custom_data == 0u) {
+			let pix = 2.0 * w.proj.y * w.size.w;
+			col = to_linear(rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix * rough, rt_sun_shadow(q, dist + h.t)));
+			known = 1.0;
+		} else if (RT_BALANCED > 0.5) {
+			col = to_linear(rt_mover_colour(h.geometry_index, h.primitive_index));
+			known = 1.0;
+		}
 	}
 	if (seen > 0.0) {
-		col = mix(col, soft_scene(s.xy, 0.002 + 0.014 * h.t / (h.t + dist), jit), seen);
+		let bend = project(o + vec3<f32>(kb * min(h.t, 4.0), 0.0)).xy - project(o).xy;
+		let uv = clamp(s.xy + bend, vec2<f32>(0.0), vec2<f32>(1.0));
+		col = mix(col, soft_scene(uv, 0.002 * rough + 0.014 * h.t / (h.t + dist), jit), seen);
 	}
 	let far = smoothstep(RT_REACH * 0.5, RT_REACH, h.t);
-	return rt_shown(mix(col, fallback, far), mix(vec3<f32>(1.0, 0.1, 0.0), vec3<f32>(1.0, 0.9, 0.0), seen));
+	return vec4<f32>(rt_shown(mix(col, fallback, far), mix(vec3<f32>(1.0, 0.1, 0.0), vec3<f32>(1.0, 0.9, 0.0), seen)), known * (1.0 - far));
+}
+
+// [PC] Ray-traced reflections (rtrefl.rs `Water`): the water's reflection `fallback` (the far-air guess at Performance, where it
+// runs before the screen-space reflection; the screen-space reflection over it from Balanced on, where it runs after) with the
+// traced ray `r` from `o` laid over it (`rt_trace`). It traces where no mirrored plane lies under the pixel, and at
+// Performance only where the screen-space march found nothing sure (`ssr` < 1).
+fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<f32>, gz: f32, dist: f32, jit: f32, kb: vec2<f32>) -> vec4<f32> {
+	if (RT_FORCE < 0.5 && ((RT_BALANCED < 0.5 && ssr > 0.99) || rt_on_mirror(pf, gz))) { return vec4<f32>(fallback, 0.0); }
+	return rt_trace(o, r, fallback, dist, 1.0, kb, jit);
+}
+
+// [PC] Ray-traced reflections (rtrefl.rs, Balanced and up): the gloss of lava, sludge and mud, `fallback` (their screen-space
+// reflection or the far air) with the traced ray laid over it, softer by `rough`.
+fn rt_gloss(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, dist: f32, rough: f32, jit: f32) -> vec3<f32> {
+	return rt_trace(o, r, fallback, dist, rough, vec2<f32>(0.0), jit).rgb;
 }
 
 // RAC_RT_REFL_SHOW=1 (dev): the traced pixels tinted (RT_SHOW 1): yellow where the hit's colour came from the picture, red where
@@ -327,7 +404,8 @@ fn rt_shown(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
 }
 "#;
 
-/// Dev only: RAC_RT_REFL_SHOW=1 tints the water pixels that traced (`rt_shown`), to see where the traced reflection applies.
+/// Dev only: RAC_RT_REFL_SHOW=1 tints the water (and lava, sludge, mud) pixels that traced (`rt_shown`), to see where the traced
+/// reflection applies.
 fn show() -> bool {
 	std::env::var("RAC_RT_REFL_SHOW").is_ok_and(|v| v == "1")
 }
@@ -338,11 +416,35 @@ fn force() -> bool {
 	std::env::var("RAC_RT_REFL_FORCE").is_ok_and(|v| v == "1")
 }
 
-/// The water shader `src` (waterfx/setup.rs) with `rt_water` after the far-air guess of `fs_water`: the structure and the alpha
-/// tables at group 2 bindings 0..2, the hit data from binding 3, the bindless texture array as group 3.
-fn water_shader(src: &str) -> String {
-	assert!(src.contains(WATER_HOOK), "rt reflections: fs_water has no reflect_ray / env lines to hook");
-	let mut src = src.replacen(WATER_HOOK, &format!("{WATER_HOOK}\trefl = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit);\n"), 1);
+/// The water shader's lines that end its screen-space reflection (`fs_water`): from Balanced on the traced one goes after them.
+const WATER_SSR_END: &str = "\t\trefl = mix(refl, soft_scene(huv, rad, jit), hit.w);\n\t}\n";
+/// How far the ripples move a screen-space hit in `fs_water`, per unit of the hit's distance (its `bend`).
+const WATER_KB: &str = "-(rs + wsd * WAVE_BEND) * 0.5 * (1.0 - FAR_BEND * ds)";
+/// The gloss lines of lava, sludge and mud (waterfx/shader.rs) and what they become from Balanced on (`rt_gloss`, softer the
+/// rougher the surface: mud reflects nothing sharp).
+const GLOSS_HOOKS: [(&str, &str); 3] = [
+	("\tmolten += refl * fres * LAVA_GLOSS;\n", "\trefl = rt_gloss(p + vec3<f32>(0.0, 0.0, 0.02), r, refl, dist, 1.5, jit);\n\tmolten += refl * fres * LAVA_GLOSS;\n"),
+	("\tcol = mix(col, refl, clamp(fres * SLUDGE_GLOSS", "\trefl = rt_gloss(p + vec3<f32>(0.0, 0.0, 0.02), r, refl, dist, 3.0, jit);\n\tcol = mix(col, refl, clamp(fres * SLUDGE_GLOSS"),
+	("col += env(r, base) * fres * MUD_SHEEN", "col += rt_gloss(p + vec3<f32>(0.0, 0.0, 0.02), r, env(r, base), dist, 8.0, 0.5) * fres * MUD_SHEEN"),
+];
+
+/// The water shader `src` (waterfx/setup.rs) with `rt_water` in `fs_water`: at Performance after the far-air guess (the
+/// screen-space reflection is laid over it), from Balanced on (`balanced`) after the screen-space reflection (the trace wins
+/// where it hits), with the lava, sludge and mud gloss traced too. The structure and the alpha tables at group 2 bindings 0..2,
+/// the hit data from binding 3, the bindless texture array as group 3.
+fn water_shader(src: &str, balanced: bool) -> String {
+	assert!(src.contains(WATER_HOOK) && src.contains(WATER_SSR_END), "rt reflections: fs_water has no reflect_ray / env / screen-space lines to hook");
+	let mut src = match balanced {
+		false => src.replacen(WATER_HOOK, &format!("{WATER_HOOK}\trefl = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit, {WATER_KB}).rgb;\n"), 1),
+		true => {
+			let mut s = src.replacen(WATER_SSR_END, &format!("{WATER_SSR_END}\tlet rtw = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit, {WATER_KB});\n\trefl = rtw.rgb;\n\tsure = max(sure, rtw.a);\n"), 1);
+			for (from, to) in GLOSS_HOOKS {
+				assert!(s.contains(from), "rt reflections: the water shader has no gloss line {from:?}");
+				s = s.replacen(from, to, 1);
+			}
+			s
+		}
+	};
 	// RAC_RT_REFL_FORCE: the traced reflection alone, so neither the screen-space one nor the mirror's image is laid over it.
 	if force() {
 		const SSR: &str = "\tif (hit.w > 0.0) {\n\t\tlet bend";
@@ -351,7 +453,15 @@ fn water_shader(src: &str) -> String {
 		src = src.replacen(SSR, "\tif (false) {\n\t\tlet bend", 1).replacen(MIRROR, "if (false) {", 1);
 	}
 	let decls = "@group(2) @binding(0) var sun_tlas: acceleration_structure;\n@group(2) @binding(1) var<storage, read> rt_tris: array<vec4<u32>>;\n@group(2) @binding(2) var<storage, read> rt_bits: array<u32>;\n";
-	format!("enable wgpu_ray_query;\nenable wgpu_binding_array;\n{src}\n{decls}{}{}{}", hit_wgsl(2, 3, 3), super::rtshadow::rt_fns(), RT_WATER.replace("RT_REACH", &format!("{:.1}", reach())).replace("RT_SHOW", if show() { "1.0" } else { "0.0" }).replace("RT_FORCE", if force() { "1.0" } else { "0.0" }))
+	let flag = |on: bool| if on { "1.0" } else { "0.0" };
+	let rt = RT_WATER
+		.replace("RT_REACH", &format!("{:.1}", reach()))
+		.replace("RT_SHOW", flag(show()))
+		.replace("RT_FORCE", flag(force()))
+		.replace("RT_BALANCED", flag(balanced))
+		.replace("RT_STRENGTH", &format!("{:.3}", super::sunshadow::STRENGTH))
+		.replace("RT_GLINT", &format!("{:.3}", super::waterfx::GLINT));
+	format!("enable wgpu_ray_query;\nenable wgpu_binding_array;\n{src}\n{decls}{}{}{rt}", hit_wgsl(2, 3, 3), super::rtshadow::rt_fns())
 }
 
 /// Phase 3: the water's shading pass with traced reflections (`water_shader`), used in place of waterfx's own while Reflections
@@ -359,8 +469,10 @@ fn water_shader(src: &str) -> String {
 pub(super) struct Water {
 	layout: wgpu::BindGroupLayout,
 	pub pipeline: wgpu::RenderPipeline,
-	/// Group 2, for the structure's hit generation.
-	bind: std::cell::RefCell<Option<(u64, wgpu::BindGroup)>>,
+	/// The stand-in movers' texture table (`movers_tex`).
+	none: wgpu::Buffer,
+	/// Group 2, for (the structure's hit generation, the movers' texture table's generation).
+	bind: std::cell::RefCell<Option<((u64, u64), wgpu::BindGroup)>>,
 }
 
 impl Water {
@@ -378,7 +490,7 @@ impl Water {
 		entries.extend(hit_layout(3, fs));
 		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("rt refl water"), entries: &entries });
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("rt refl water"), bind_group_layouts: &[Some(water_layout), None, Some(&layout), Some(array_layout)], immediate_size: 0 });
-		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl water"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl water", water_shader(src).into())) });
+		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl water"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl water", water_shader(src, movers_shaded()).into())) });
 		let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 			label: Some("water shade rt"),
 			layout: Some(&pl),
@@ -390,18 +502,25 @@ impl Water {
 			multiview_mask: None,
 			cache: None,
 		});
-		eprintln!("rt reflections: water traced {} (reach {:.0}){}", if force() { "everywhere (RAC_RT_REFL_FORCE)" } else { "where the screen-space reflection misses" }, reach(), if show() { ", traced pixels tinted (RAC_RT_REFL_SHOW)" } else { "" });
-		Some(Water { layout, pipeline, bind: Default::default() })
+		let where_ = match (force(), movers_shaded()) {
+			(true, _) => "everywhere (RAC_RT_REFL_FORCE)",
+			(false, false) => "where the screen-space reflection misses",
+			(false, true) => "off the mirrored planes, with sun shadows, moving things and the lava, sludge and mud gloss",
+		};
+		eprintln!("rt reflections: water traced {where_} (reach {:.0}){}", reach(), if show() { ", traced pixels tinted (RAC_RT_REFL_SHOW)" } else { "" });
+		Some(Water { layout, pipeline, none: movers_none(device), bind: Default::default() })
 	}
 
 	/// Group 2 for the level's structure `rt`, or None until it has hit data (the water then shades as before).
 	pub(super) fn group(&self, device: &wgpu::Device, rt: &super::rtshadow::RtShadow) -> Option<wgpu::BindGroup> {
-		let (hit, generation) = rt.hit()?;
+		let (hit, hit_gen) = rt.hit()?;
+		let (mtex, mgen) = movers_tex(rt, &self.none);
+		let generation = (hit_gen, mgen);
 		let mut b = self.bind.borrow_mut();
 		if b.as_ref().is_none_or(|b| b.0 != generation) {
 			// trace_entries are bindings 3..5 of the mask pass's layout; here 0..2.
 			let mut entries: Vec<wgpu::BindGroupEntry> = rt.trace_entries().map(|e| wgpu::BindGroupEntry { binding: e.binding - 3, resource: e.resource }).into();
-			entries.extend(hit_entries(hit, 3));
+			entries.extend(hit_entries(hit, mtex, 3));
 			*b = Some((generation, device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("rt refl water"), layout: &self.layout, entries: &entries })));
 		}
 		b.as_ref().map(|b| b.1.clone())
@@ -414,5 +533,11 @@ mod tests {
 	fn ray_traced_reflection_shaders_validate() {
 		let m = naga::front::wgsl::parse_str(&super::debug_shader()).expect("rt refl debug wgsl parse");
 		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("rt refl debug wgsl validate");
+		// The traced water at Performance and from Balanced on (its hooks found, its source whole).
+		let src = super::super::waterfx::shade_source("");
+		for balanced in [false, true] {
+			let m = naga::front::wgsl::parse_str(&super::water_shader(&src, balanced)).unwrap_or_else(|e| panic!("rt refl water wgsl parse (balanced {balanced}): {e}"));
+			naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("rt refl water wgsl validate (balanced {balanced}): {e:?}"));
+		}
 	}
 }

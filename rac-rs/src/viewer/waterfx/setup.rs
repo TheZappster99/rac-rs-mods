@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// The water module's source, `dbg` in place of its `//DBGHOOK` (RAC_WATER_DBG); the traced water (rtrefl.rs) builds on it.
+pub(in crate::viewer) fn source(dbg: &str) -> String {
+	SHADER.replace("//DBGHOOK", dbg) + &skymap::wgsl(12, 13) + edge_calm::EDGE_WGSL + far_look::FAR_WGSL + steep_look::STEEP_WGSL + shore_fade::SHORE_FADE_WGSL + shore_map::SHORE_DIST_WGSL + hero_crest::HERO_CREST_WGSL + rim::RIM_WGSL + underside::UNDER_WGSL + dry_tiles::DRY_WGSL
+}
+
 impl WaterFx {
 	pub(in crate::viewer) fn new(device: &wgpu::Device, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat, tex_layout: &wgpu::BindGroupLayout, rt_array: Option<&wgpu::BindGroupLayout>) -> WaterFx {
 		// RAC_WATER_DBG=N (dev aid, off by default): fs_water returns one of its inputs as a colour (seam hunting).
@@ -14,7 +19,7 @@ impl WaterFx {
 			Some(5) => "return vec4<f32>(orig, 1.0);",
 			_ => "",
 		};
-		let src = SHADER.replace("//DBGHOOK", dbg) + &skymap::wgsl(12, 13) + edge_calm::EDGE_WGSL + far_look::FAR_WGSL + steep_look::STEEP_WGSL + shore_fade::SHORE_FADE_WGSL + shore_map::SHORE_DIST_WGSL + hero_crest::HERO_CREST_WGSL + rim::RIM_WGSL + underside::UNDER_WGSL + dry_tiles::DRY_WGSL;
+		let src = source(dbg);
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("water fx"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("water fx", src.clone().into())) });
 		let tex = |binding: u32, sample_type: wgpu::TextureSampleType, multisampled: bool| wgpu::BindGroupLayoutEntry {
 			binding,

@@ -71,6 +71,8 @@ pub(super) use self::draws::*;
 use self::contacts::*;
 use self::wakes::*;
 pub(in crate::viewer) use self::skymap::{wgsl as sky_wgsl, SkyMap};
+#[cfg(test)]
+pub(in crate::viewer) use self::setup::source as shade_source;
 use self::flows::*;
 use self::dry_tiles::{DryGroups, DryTiles};
 

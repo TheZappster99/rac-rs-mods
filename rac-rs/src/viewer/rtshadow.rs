@@ -38,13 +38,15 @@ static ON: AtomicBool = AtomicBool::new(false);
 static SHADOWS: AtomicBool = AtomicBool::new(false);
 
 /// A part of the Ray tracing built-in mod (plugins.rs `RayTracing`, read at start-up): its setting's value (index into its values;
-/// 0 = Off), or 0 while the mod is off. The part's old dev switch `env` set to 1 forces it to at least its first On value.
+/// 0 = Off), or 0 while the mod is off. The part's old dev switch `env` set to 1 forces it to at least its first On value; set to
+/// 2 or more it picks that value (e.g. RAC_RT_REFLECTIONS=2: Balanced), so a quality can be tried without the launcher.
 pub(super) fn part(setting: &str, env: &str) -> u8 {
 	let id = crate::plugins::RAY_TRACING;
 	let v = if crate::plugins::on_at_start(id) { crate::plugins::value_at_start(id, setting) } else { 0 };
-	match std::env::var(env).is_ok_and(|v| v == "1") {
-		true => v.max(1),
-		false => v,
+	match std::env::var(env).ok().and_then(|v| v.parse::<u8>().ok()) {
+		Some(1) => v.max(1),
+		Some(n) if n > 1 => n,
+		_ => v,
 	}
 }
 
@@ -895,6 +897,12 @@ impl RtShadow {
 	/// The static world's hit data with a number that changes with each level's structure (None: not built, or not bindable).
 	pub(super) fn hit(&self) -> Option<(&Hit, u64)> {
 		self.hit.as_ref().filter(|_| self.blas.is_some()).map(|h| (h, self.hit_gen))
+	}
+
+	/// The moving things' texture table (rtmovers.rs `tex_table`, Reflections at Balanced and up) with a number that changes
+	/// when its buffer is remade; None before the first.
+	pub(super) fn movers_tex(&self) -> Option<(&wgpu::Buffer, u64)> {
+		self.movers.tex()
 	}
 }
 

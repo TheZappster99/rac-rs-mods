@@ -10,6 +10,8 @@
 //!   own vertex buffers go in as they are, with their solid draws copied into the same index buffer.
 //! - Everything is opaque (no texel test) and built for speed (`PREFER_FAST_BUILD`). The shadow mask reads last frame's, so
 //!   a moving shadow lags one frame behind its caster.
+//! - For the ray-traced reflections at Balanced and up (rtrefl.rs `rt_mover_colour`): each triangle's texture slot
+//!   (`tex_table`), so a reflected mover the picture does not show gets its texture's mean colour.
 
 use super::*;
 
@@ -64,6 +66,11 @@ pub(super) struct RtMovers {
 	scratch: Vec<[f32; 3]>,
 	/// Builds so far (a summary goes to the run log every `LOG_EVERY`).
 	builds: u32,
+	/// Each triangle's texture slot (`tex_table`) and its room in u32s, and a number that changes when the buffer is remade.
+	tex: Option<(wgpu::Buffer, usize)>,
+	tex_gen: u64,
+	/// Scratch: this frame's texture table.
+	tex_scratch: Vec<u32>,
 }
 
 impl RtMovers {
@@ -74,7 +81,7 @@ impl RtMovers {
 		let t = std::time::Instant::now();
 		let solid = |d: &Draw| !scene.clear_tex.get(d.texture).copied().unwrap_or(false);
 		// The props slots that cast, posed into `scratch` at their vertex ranges (the ranges are uploaded one by one).
-		let mut runs: Vec<(u32, u32)> = Vec::new();
+		let mut runs: Vec<(u32, u32, u32)> = Vec::new();
 		let mut slots: Vec<usize> = Vec::new();
 		if scene.props_shown && which.props {
 			for (i, s) in scene.props_inst.iter().enumerate() {
@@ -90,8 +97,8 @@ impl RtMovers {
 				}
 				let before = runs.len();
 				for &(d, first, count) in scene.slot_runs.get(i).map_or(&[][..], |r| &r[..]) {
-					if scene.props.draws.get(d as usize).is_some_and(|d| solid(d)) {
-						runs.push((first, count));
+					if let Some(d) = scene.props.draws.get(d as usize).filter(|d| solid(d)) {
+						runs.push((first, count, d.texture as u32));
 					}
 				}
 				if runs.len() > before {
@@ -101,8 +108,8 @@ impl RtMovers {
 		}
 		let props_idx: u32 = runs.iter().map(|r| r.1).sum();
 		// The world-space batches: the player, the clipped props, the debris (their solid draws).
-		let mut whole: Vec<(&Batch, Vec<(u32, u32)>)> = Vec::new();
-		let add = |b: &Batch| b.draws.iter().filter(|d| solid(d)).map(|d| (d.start, d.count)).collect::<Vec<_>>();
+		let mut whole: Vec<(&Batch, Vec<(u32, u32, u32)>)> = Vec::new();
+		let add = |b: &Batch| b.draws.iter().filter(|d| solid(d)).map(|d| (d.start, d.count, d.texture as u32)).collect::<Vec<_>>();
 		if scene.marker_shown && which.player {
 			whole.push((&scene.marker, add(&scene.marker)));
 		}
@@ -144,8 +151,8 @@ impl RtMovers {
 		let mut enc = device.create_command_encoder(&Default::default());
 		let mut geos: Vec<Geo> = Vec::new();
 		let mut at = 0u32;
-		let copy = |enc: &mut wgpu::CommandEncoder, src: &wgpu::Buffer, runs: &[(u32, u32)], at: &mut u32| {
-			for &(s, n) in runs {
+		let copy = |enc: &mut wgpu::CommandEncoder, src: &wgpu::Buffer, runs: &[(u32, u32, u32)], at: &mut u32| {
+			for &(s, n, _) in runs {
 				enc.copy_buffer_to_buffer(src, s as u64 * 4, ibuf, *at as u64 * 4, Some(n as u64 * 4));
 				*at += n;
 			}
@@ -174,11 +181,44 @@ impl RtMovers {
 			.collect();
 		enc.build_acceleration_structures(std::iter::once(&wgpu::BlasBuildEntry { blas: &blas, geometry: wgpu::BlasGeometries::TriangleGeometries(geometry) }), std::iter::empty());
 		queue.submit([enc.finish()]);
+		if super::rtrefl::movers_shaded() {
+			// The geometries in the structure's order: the posed props, then the world-space batches.
+			let order: Vec<&[(u32, u32, u32)]> = std::iter::once(&runs[..]).filter(|_| props_idx > 0).chain(whole.iter().map(|(_, r)| &r[..])).collect();
+			self.tex_table(device, queue, &order);
+		}
 		self.blas = Some(blas);
 		self.builds += 1;
 		if self.builds % LOG_EVERY == 1 {
 			eprintln!("rt movers: {} prop slots ({} triangles), {} other triangles, {:.2} ms", slots.len(), props_idx / 3, (total - props_idx) / 3, t.elapsed().as_secs_f64() * 1e3);
 		}
 		self.blas.as_ref()
+	}
+
+	/// The reflections' texture table for this frame's geometries (`geos`: each one's runs, in the compact index buffer's
+	/// order): first where each geometry's triangles start in the table (4 u32), then each triangle's texture slot. Remade
+	/// larger as needed.
+	fn tex_table(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, geos: &[&[(u32, u32, u32)]]) {
+		let t = &mut self.tex_scratch;
+		t.clear();
+		t.resize(4, 0);
+		for (k, runs) in geos.iter().take(4).enumerate() {
+			t[k] = t.len() as u32;
+			for &(_, n, tex) in runs.iter() {
+				t.extend(std::iter::repeat_n(tex, (n / 3) as usize));
+			}
+		}
+		if self.tex.as_ref().is_none_or(|b| b.1 < t.len()) {
+			let cap = t.len().next_power_of_two().max(1 << 14);
+			self.tex = Some((device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers textures"), size: (cap * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), cap));
+			self.tex_gen += 1;
+		}
+		if let Some((b, _)) = &self.tex {
+			queue.write_buffer(b, 0, bytemuck::cast_slice(t));
+		}
+	}
+
+	/// The reflections' texture table (`tex_table`) and a number that changes when its buffer is remade; None before the first.
+	pub(super) fn tex(&self) -> Option<(&wgpu::Buffer, u64)> {
+		self.tex.as_ref().map(|b| (&b.0, self.tex_gen))
 	}
 }

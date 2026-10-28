@@ -70,7 +70,7 @@ pub(super) const REFRACTION: f32 = 0.5;
 pub(super) const SHEEN: f32 = 0.1;
 pub(super) const FOAM: f32 = 0.4;
 pub(super) const REFLECTION: f32 = 1.0;
-pub(super) const GLINT: f32 = 2.2;
+pub(in crate::viewer) const GLINT: f32 = 2.2;
 /// How clear the water is over its bed (0 = the retail colour throughout).
 pub(super) const CLEAR: f32 = 1.0;
 

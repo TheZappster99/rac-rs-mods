@@ -1,10 +1,14 @@
 # Ray-traced reflections: plan
 
-Status (2026-10-28): phases 1-4 done. Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
+Status (2026-10-28): phases 1-5 done. Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
 the water with the picture's own lighting; `water shade` 0.50 ms with every water pixel traced and a lot of water on screen.
 Without the force switch Performance traces little (the planar mirror covers flat water on most levels). Dev switches:
-RAC_RT_REFL_SHOW=1 (tint: yellow from the picture, red shaded, blue nothing hit), RAC_RT_REFL_FORCE=1 (trace everywhere).
-Next: phase 5 (Balanced).
+RAC_RT_REFL_SHOW=1 (tint: yellow from the picture, red shaded, blue nothing hit), RAC_RT_REFL_FORCE=1 (trace everywhere),
+RAC_RT_REFLECTIONS=2 / 3 (start at Balanced / Ultra without the launcher).
+Phase 5 (Balanced) checked in game on Pokitaru, Gaspar lava and Orxon sludge: `water shade` 0.31 ms median, 0.67 ms at worst
+(budget 1.5 ms); with RAC_RT_REFL_FORCE=1 (every water pixel traced, mirror off) 0.65 ms at worst on Pokitaru. A straight
+cut-off at the end of a Gaspar lava pool by a pillar shows at Performance too (no traced lava there): not the reflections.
+Next: phase 6 (chrome and glass).
 
 The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
 (2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics
@@ -108,7 +112,7 @@ Test spots (the same each phase, with `--shot` A/B screenshots of the screen-spa
 | 2 | Hit data: vertex buffers + compact index buffer + per-triangle texture slot as storage; WGSL `rt_hit(p, r, reach)` returning colour and distance (texel × vertex colour, misses give the sky) | A debug view (`RAC_POST_VIEW=rtrefl`) showing the hit colour of every pixel's mirror ray |
 | 3 | Water, Performance: `fs_water` (a second pipeline, rtrefl.rs `Water`) traces one ray inline where `reflect_ray` is unsure and no mirrored plane lies under the pixel, in place of the `env()` guess; static world only, reach 60. (Planned as a quarter-size compute pass; tracing inline only where needed is simpler, needs no upsampling, and the phase 2 numbers said it fits.) | **First visible step:** no more fog reflections at screen edges / looking down. Budget ≤ 0.5 ms |
 | 4 | Re-projection into the current picture: a hit that is on screen at the picture's depth takes the picture's colour (`soft_scene`), off-screen / hidden hits keep the hit shading; the moving things are traced too and show where the picture has them. (Planned with last frame's picture; `fs_water` already has this frame's, so there is no lag or ghosting.) | Reflections match the real picture, Ratchet included when he is on screen |
-| 5 | Balanced: trace all non-mirror water pixels at half size, sun shadow ray at the hit, movers with flat colour; lava, sludge and mud gloss too | Rivers, waves and the sea reflect correctly. Budget ≤ 1.5 ms |
+| 5 | Balanced: trace all non-mirror water pixels, sun shadow ray at the hit, movers with flat colour; lava, sludge and mud gloss too. (Planned at half size; traced inline at full size as in phase 3, since phase 4 traced every water pixel in 0.5 ms. The trace runs after the screen-space reflection and wins where it hits; picture hits are moved by the ripples as the screen-space ones are. Movers off screen: their texture's mean from a per-triangle texture table rtmovers.rs fills each frame.) | Rivers, waves and the sea reflect correctly. Budget ≤ 1.5 ms |
 | 6 | Chrome and glass: the metal packets' fragment shader traces one ray (inline, like `sun_occ`) and mixes the hit with the env texture (Balanced), or replaces it (Ultra) | Bolts and ships reflect the level |
 | 7 | Ultra: full size, 2 rays on rough water and glass, mirrored planes traced too and `mirror.rs`'s redraw switched off, movers textured | Best looks. Budget ≤ 3.5 ms |
 | 8 | Tuning pass at the test spots, README / CHANGELOG wording for players, mod description | Ready to ship |
