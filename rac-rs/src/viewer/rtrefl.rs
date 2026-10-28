@@ -7,9 +7,14 @@
 //!
 //! Phase 2: what a ray sees where it hits the static world (`RT_HIT`, `rt_hit_colour`): the triangle's uv and baked vertex colour
 //! from the batch it came from (rtshadow.rs `Hit`), its texture from the bindless array at the mip its footprint covers,
-//! texel x colour as the level shader's `fs` (no sun, no fog yet). The dev view RAC_POST_VIEW=rtrefl (`Debug`) traces the
-//! camera's own view rays through it at half size and shows the result alone, so the traced picture can be held against the
-//! drawn one. Nothing on screen changes without it.
+//! texel x colour as the level shader's `fs` (no sun, no fog). The dev view RAC_POST_VIEW=rtrefl (`Debug`) traces the camera's
+//! own view rays through it at half size and shows the result alone, so the traced picture can be held against the drawn one.
+//!
+//! Phase 3 (`Water`, `rt_water`): the water's shading pass traces one ray where the screen-space reflection is unsure and no
+//! planar mirror covers the pixel, in place of the far-air guess. Dev switches: RAC_RT_REFL_SHOW=1, RAC_RT_REFL_FORCE=1.
+//!
+//! Phase 4 (`rt_water`): a traced hit the picture shows (on screen, at the picture's depth there) takes the picture's colour, so
+//! it carries the sun, the shadows and the fog; the moving things are traced too and show where the picture has them.
 
 use super::*;
 
@@ -51,7 +56,7 @@ pub(super) fn announce(traces: bool) {
 		return;
 	}
 	match traces {
-		true => eprintln!("rt reflections: on, quality {:?} (phase 3: water only)", quality()),
+		true => eprintln!("rt reflections: on, quality {:?} (phase 4: water only)", quality()),
 		false => eprintln!("rt reflections: switched on, but the adapter has no ray queries on Vulkan: off"),
 	}
 }
@@ -279,27 +284,44 @@ fn rt_on_mirror(pf: vec3<f32>, gz: f32) -> bool {
 	return abs(pf.z - w.mirror.x) < 0.4 || (w.mirror2.z > 1.5 && abs(pf.z - w.mirror2.x) < 0.4) || (w.mirror2.z > 2.5 && abs(pf.z - w.mirror2.y) < 0.4);
 }
 
-// [PC] Ray-traced reflections, Performance (rtrefl.rs `Water`): where the screen-space march found nothing sure (`ssr` < 1) and no
-// mirrored plane lies under the pixel, the reflected ray `r` from `o` traced through the static world; `fallback`, the far-air
-// guess, becomes what it hits (linear light, far hits fading back into the guess). A miss or a moving thing keeps the guess.
-// `dist`: the eye's distance to the surface (the footprint at the hit grows with the whole path).
-fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<f32>, gz: f32, dist: f32) -> vec3<f32> {
+// [PC] Ray-traced reflections (rtrefl.rs `Water`): where the screen-space march found nothing sure (`ssr` < 1) and no mirrored
+// plane lies under the pixel, the reflected ray `r` from `o` traced through the static world and the moving things; `fallback`,
+// the far-air guess, becomes what it hits (linear light, far hits fading back into the guess). A miss keeps the guess.
+// Phase 4: a hit the picture shows (on screen, not hidden behind something nearer: its depth matches the picture's there) takes
+// the picture's colour, softened as the screen-space reflection softens it, so it has the sun, the shadows and the fog the
+// picture has; a hit off screen or hidden takes `rt_hit_colour` (the static world) or keeps the guess (a moving thing).
+// `dist`: the eye's distance to the surface (the footprint at the hit grows with the whole path); `jit`: the pixel's dither.
+fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<f32>, gz: f32, dist: f32, jit: f32) -> vec3<f32> {
 	if (RT_FORCE < 0.5 && (ssr > 0.99 || rt_on_mirror(pf, gz))) { return fallback; }
 	var rq: ray_query;
-	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_NONE, 0x01u, 0.05, RT_REACH, o, r));
+	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_NONE, 0xffu, 0.05, RT_REACH, o, r));
 	while (rayQueryProceed(&rq)) {
 		if (rt_texel_casts(rayQueryGetCandidateIntersection(&rq))) {
 			rayQueryConfirmIntersection(&rq);
 		}
 	}
 	let h = rayQueryGetCommittedIntersection(&rq);
-	if (h.kind == RAY_QUERY_INTERSECTION_NONE || h.instance_custom_data != 0u) { return rt_shown(fallback, vec3<f32>(0.0, 0.2, 1.0)); }
-	let pix = 2.0 * w.proj.y * w.size.w;
-	let col = to_linear(rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix));
-	return rt_shown(mix(col, fallback, smoothstep(RT_REACH * 0.5, RT_REACH, h.t)), vec3<f32>(1.0, 0.1, 0.0));
+	if (h.kind == RAY_QUERY_INTERSECTION_NONE) { return rt_shown(fallback, vec3<f32>(0.0, 0.2, 1.0)); }
+	// How much of the hit the picture shows: on screen, at the picture's depth there (the edges fade as the screen-space ones do).
+	let s = project(o + r * h.t);
+	var seen = 0.0;
+	if (on_screen(s) && abs(s.z - scene_z(s.xy)) < 0.05 + 0.02 * s.z) {
+		seen = edge_fade(s.xy);
+	}
+	var col = fallback;
+	if (h.instance_custom_data == 0u) {
+		let pix = 2.0 * w.proj.y * w.size.w;
+		col = to_linear(rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix));
+	}
+	if (seen > 0.0) {
+		col = mix(col, soft_scene(s.xy, 0.002 + 0.014 * h.t / (h.t + dist), jit), seen);
+	}
+	let far = smoothstep(RT_REACH * 0.5, RT_REACH, h.t);
+	return rt_shown(mix(col, fallback, far), mix(vec3<f32>(1.0, 0.1, 0.0), vec3<f32>(1.0, 0.9, 0.0), seen));
 }
 
-// RAC_RT_REFL_SHOW=1 (dev): the traced pixels tinted, red where the ray hit something, blue where it found nothing (RT_SHOW 1).
+// RAC_RT_REFL_SHOW=1 (dev): the traced pixels tinted (RT_SHOW 1): yellow where the hit's colour came from the picture, red where
+// it was shaded from the level's own data, blue where the ray found nothing.
 fn rt_shown(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
 	return mix(c, tint, RT_SHOW * 0.7);
 }
@@ -320,7 +342,7 @@ fn force() -> bool {
 /// tables at group 2 bindings 0..2, the hit data from binding 3, the bindless texture array as group 3.
 fn water_shader(src: &str) -> String {
 	assert!(src.contains(WATER_HOOK), "rt reflections: fs_water has no reflect_ray / env lines to hook");
-	let mut src = src.replacen(WATER_HOOK, &format!("{WATER_HOOK}\trefl = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist);\n"), 1);
+	let mut src = src.replacen(WATER_HOOK, &format!("{WATER_HOOK}\trefl = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit);\n"), 1);
 	// RAC_RT_REFL_FORCE: the traced reflection alone, so neither the screen-space one nor the mirror's image is laid over it.
 	if force() {
 		const SSR: &str = "\tif (hit.w > 0.0) {\n\t\tlet bend";
