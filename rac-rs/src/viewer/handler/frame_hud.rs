@@ -7,7 +7,7 @@ impl App {
 		let dt = f.dt;
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			let p = &game.player;
-			let title = format!("{} - {} - bolts {} - health {}/4{}", crate::app_name(), toc::LEVEL_NAMES[self.level], game.bolts, game.health.max(0), crate::retail::debugkeys::title_suffix()) + &crate::retail::devtools::title_suffix(self.level, game.player.pos);
+			let title = format!("{} - {} - bolts {} - health {}/4{}", crate::app_name(), toc::LEVEL_NAMES[self.level], game.bolts, game.health.max(0), crate::retail::debugkeys::title_suffix()) + &crate::retail::devtools::title_suffix(self.level, game.player.pos) + &crate::viewer::rtrefl::title_suffix();
 			self.shown_bolts = if (game.bolts as f32) < self.shown_bolts { game.bolts as f32 } else { (self.shown_bolts + dt * 60.0f32.max((game.bolts as f32 - self.shown_bolts) * 4.0)).min(game.bolts as f32) };
 			// NOV-30f nano request latch (compares against the previous frame's health before `hud_seen` updates).
 			hud::nano_request(&mut self.nano_live, &mut self.nano_hud, game.shop.is_some(), game.health, self.hud_seen.1);

@@ -127,7 +127,9 @@ impl Gpu {
 			}
 			// BRIDGE-45 (NOV-35b): the props' metal faces (chrome / glass, clamp sampler) after the LOD batches.
 			let metal = self.metal.props.as_ref().zip(self.metal.tex.as_ref()).filter(|_| scene.props_shown && !warp);
-			self.pass_pools(&mut pass, warp, metal, water_on, wrec);
+			// [PC] Ray-traced reflections (rtrefl.rs `Metal`): the chrome and glass trace once the level's structure has hit data.
+			let metal_rt = self.sun.rt_metal.as_ref().zip(self.sun.rt.as_ref()).zip(scene.tex_array.as_ref()).and_then(|((m, rt), a)| Some((m.pipelines(&self.device)?, m.group(&self.device, rt)?, a)));
+			self.pass_pools(&mut pass, warp, metal, metal_rt.as_ref(), water_on, wrec);
 			self.pass_shrubs(&mut pass, scene, warp, array, multi);
 			// BRIDGE-64a: the shadow volumes and the darken, then the deferred-list slots drawn opaque over them.
 			if let Some(vb) = volumes.filter(|_| !dskip("vol")) {
@@ -198,8 +200,12 @@ impl Gpu {
 				if let Some((batch, tex)) = metal {
 					pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 					pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-					for pipeline in &self.moby_pipelines {
-						pass.set_pipeline(pipeline);
+					if let Some((_, g, a)) = &metal_rt {
+						pass.set_bind_group(2, g, &[]);
+						pass.set_bind_group(3, *a, &[]);
+					}
+					for (k, pipeline) in self.moby_pipelines.iter().enumerate() {
+						pass.set_pipeline(metal_rt.as_ref().map_or(pipeline, |(m, ..)| &m.blend[k]));
 						for d in &batch.draws {
 							pass.set_bind_group(1, &tex[d.texture], &[]);
 							pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);

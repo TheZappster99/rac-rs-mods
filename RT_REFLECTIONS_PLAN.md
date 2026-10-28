@@ -4,11 +4,16 @@ Status (2026-10-28): phases 1-5 done. Phase 4 checked on Pokitaru (RAC_RT_REFL_F
 the water with the picture's own lighting; `water shade` 0.50 ms with every water pixel traced and a lot of water on screen.
 Without the force switch Performance traces little (the planar mirror covers flat water on most levels). Dev switches:
 RAC_RT_REFL_SHOW=1 (tint: yellow from the picture, red shaded, blue nothing hit), RAC_RT_REFL_FORCE=1 (trace everywhere),
-RAC_RT_REFLECTIONS=2 / 3 (start at Balanced / Ultra without the launcher).
+RAC_RT_REFLECTIONS=2 / 3 (start at Balanced / Ultra without the launcher). In game, Insert steps Reflections Off -> Performance ->
+Balanced -> Ultra for the session (needs Reflections on at start-up; the traced pipelines are rebuilt on the next frame, a short
+hitch; the run log says which, `rtrefl::cycle`).
 Phase 5 (Balanced) checked in game on Pokitaru, Gaspar lava and Orxon sludge: `water shade` 0.31 ms median, 0.67 ms at worst
 (budget 1.5 ms); with RAC_RT_REFL_FORCE=1 (every water pixel traced, mirror off) 0.65 ms at worst on Pokitaru. A straight
 cut-off at the end of a Gaspar lava pool by a pillar shows at Performance too (no traced lava there): not the reflections.
-Next: phase 6 (chrome and glass).
+Phase 6 (chrome and glass) built (rtrefl.rs `Metal`): the game starts at Balanced with the traced metal pipelines (log: "chrome
+and glass traced"); looked at in game at Ultra and switched live with Insert (looks good), not yet timed. It has no pass of its own to time (the metal draws inside the level
+pass), so its cost is the level pass's time with and without it. Then: the wrench head (a request, not retail: it is a plain
+textured moby, class 71), traced as the chrome is from Balanced on.
 
 The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
 (2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics

@@ -380,6 +380,11 @@ impl Gpu {
 		sun.rt_rays = (super::rtshadow::on() && super::rtrays::wanted()).then(|| super::rtrays::RtRays::new(&device));
 		// [PC] RAC_POST_VIEW=rtrefl (rtrefl.rs): the reflections' hit shading, seen from the camera; it samples the bindless array.
 		sun.rt_refl = bindless.as_ref().filter(|_| super::rtshadow::on() && super::rtrefl::debug_view()).map(|b| super::rtrefl::Debug::new(&device, &b.layout));
+		// [PC] Ray-traced reflections, Balanced and up (rtrefl.rs `Metal`): the props' chrome and glass, from the level shader as it runs.
+		if super::rtrefl::wanted() && super::rtshadow::on() {
+			let src = super::rtshadow::level(super::volfog::soft::level_source(SHADER, super::volfog::soft::early(&device)));
+			sun.rt_metal = super::rtrefl::Metal::new(&device, &src, &ulayout, &tex_layout, bindless.as_ref().map(|b| &b.layout), config.format, depth_format, config.height as f32);
+		}
 		let ubuf = buffer(&device, "uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM);
 		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: &ulayout, entries: &sun.entries(&ubuf) });
 		let mirror: Vec<super::mirror::Mirror> = (0..super::mirror::MAX_MIRRORS).map(|_| super::mirror::Mirror::new(&device, &ulayout, &sun)).collect();

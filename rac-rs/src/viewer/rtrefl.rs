@@ -20,6 +20,10 @@
 //! stays where the ray finds nothing within reach); a static-world hit off screen gets the sun's shadow (one ray to the light);
 //! a moving thing off screen gets its texture's mean colour (rtmovers.rs `tex_table`); lava, sludge and mud trace their gloss.
 //! Picture hits are moved by the ripples as the screen-space ones are.
+//!
+//! Phase 6 (`Metal`, Balanced and up): the props' chrome and glass (gpu/metal.rs) are drawn by a copy of the level pipelines
+//! whose texel goes through `rt_metal`: one ray along the mirror of the view, its hit shaded as off-screen water hits are, laid
+//! over the retail environment texture (mixed at Balanced, alone at Ultra). A miss keeps the env texture.
 
 use super::*;
 
@@ -38,16 +42,62 @@ pub(super) enum Quality {
 }
 
 /// The Reflections setting at start-up: 0 Off, 1.. the qualities.
-fn setting() -> u8 {
+fn start_setting() -> u8 {
 	super::rtshadow::part("reflections", "RAC_RT_REFLECTIONS")
 }
 
-/// Reflections are on (read at start-up: the ray-tracing device feature is requested when the window opens).
+/// The Reflections setting the Insert key (`cycle`) switched to, u8::MAX until it is pressed.
+static LIVE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+/// The Reflections setting now: the start-up one until the Insert key changes it.
+fn setting() -> u8 {
+	match LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+		u8::MAX => start_setting(),
+		v => v,
+	}
+}
+
+/// Reflections were on at start-up (the ray-tracing device feature is requested when the window opens, and the level's
+/// structure and the traced passes exist from then on, whatever the Insert key switches to later).
 pub(super) fn wanted() -> bool {
+	start_setting() > 0
+}
+
+/// Reflections trace now (Off by the Insert key: the water and the metal draw as they do without the mod).
+fn tracing() -> bool {
 	setting() > 0
 }
 
-/// The quality the game started with (Performance while Reflections are off).
+/// [PC] Insert (while Reflections were on at start-up): the next Reflections setting, Off -> Performance -> Balanced -> Ultra, for
+/// this session only, to see the qualities side by side. The traced pipelines are built again for it on their next use (a
+/// short hitch while the shaders compile); the window title shows it (`title_suffix`).
+pub(in crate::viewer) fn cycle() {
+	if !wanted() || !super::rtshadow::on() {
+		return;
+	}
+	let next = (setting() + 1) % 4;
+	LIVE.store(next, std::sync::atomic::Ordering::Relaxed);
+	eprintln!("rt reflections: Insert key: {}", setting_name(next));
+}
+
+fn setting_name(s: u8) -> &'static str {
+	match s {
+		0 => "Off",
+		1 => "Performance",
+		2 => "Balanced",
+		_ => "Ultra",
+	}
+}
+
+/// The window title's note once the Insert key has switched the Reflections setting (nothing before that).
+pub(in crate::viewer) fn title_suffix() -> String {
+	match LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+		u8::MAX => String::new(),
+		v => format!(" - RT reflections {}", setting_name(v)),
+	}
+}
+
+/// The quality now (Performance while Reflections are off).
 pub(super) fn quality() -> Quality {
 	match setting() {
 		0 | 1 => Quality::Performance,
@@ -62,7 +112,7 @@ pub(super) fn announce(traces: bool) {
 		return;
 	}
 	match traces {
-		true => eprintln!("rt reflections: on, quality {:?} (phase 5: {})", quality(), if movers_shaded() { "water, lava, sludge, mud" } else { "water" }),
+		true => eprintln!("rt reflections: on, quality {:?} (phase 6: {})", quality(), if movers_shaded() { "water, lava, sludge, mud, chrome, glass" } else { "water" }),
 		false => eprintln!("rt reflections: switched on, but the adapter has no ray queries on Vulkan: off"),
 	}
 }
@@ -70,7 +120,7 @@ pub(super) fn announce(traces: bool) {
 /// Reflections at Balanced and up: the whole water traces, with the sun's shadow at a hit and the moving things shaded off
 /// screen (rtmovers.rs keeps their texture table for it).
 pub(super) fn movers_shaded() -> bool {
-	wanted() && quality() != Quality::Performance
+	wanted() && tracing() && quality() != Quality::Performance
 }
 
 /// Dev only: RAC_POST_VIEW=rtrefl shows what the camera's own view rays hit, traced and shaded as reflections will be (`Debug`).
@@ -464,22 +514,19 @@ fn water_shader(src: &str, balanced: bool) -> String {
 	format!("enable wgpu_ray_query;\nenable wgpu_binding_array;\n{src}\n{decls}{}{}{rt}", hit_wgsl(2, 3, 3), super::rtshadow::rt_fns())
 }
 
-/// Phase 3: the water's shading pass with traced reflections (`water_shader`), used in place of waterfx's own while Reflections
-/// are on and the level's structure has hit data.
-pub(super) struct Water {
+/// The traced passes' group 2: the level's structure and its alpha tables at bindings 0..2, the hit data from binding 3
+/// (`hit_wgsl(2, 3, 3)`), made again when the structure's hit data or the movers' texture table change.
+struct HitGroup {
 	layout: wgpu::BindGroupLayout,
-	pub pipeline: wgpu::RenderPipeline,
 	/// The stand-in movers' texture table (`movers_tex`).
 	none: wgpu::Buffer,
-	/// Group 2, for (the structure's hit generation, the movers' texture table's generation).
+	/// For (the structure's hit generation, the movers' texture table's generation).
 	bind: std::cell::RefCell<Option<((u64, u64), wgpu::BindGroup)>>,
+	label: &'static str,
 }
 
-impl Water {
-	/// None unless Reflections are on, the device traces and the bindless array exists (`array_layout`). `src`: the water
-	/// module's source, `water_layout` its group 0, `format` the post scene's.
-	pub(super) fn new(device: &wgpu::Device, src: &str, water_layout: &wgpu::BindGroupLayout, array_layout: Option<&wgpu::BindGroupLayout>, format: wgpu::TextureFormat) -> Option<Water> {
-		let array_layout = array_layout.filter(|_| wanted() && super::rtshadow::on())?;
+impl HitGroup {
+	fn new(device: &wgpu::Device, label: &'static str) -> HitGroup {
 		let fs = wgpu::ShaderStages::FRAGMENT;
 		let storage = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None };
 		let mut entries = vec![
@@ -488,14 +535,61 @@ impl Water {
 			wgpu::BindGroupLayoutEntry { binding: 2, visibility: fs, ty: storage, count: None },
 		];
 		entries.extend(hit_layout(3, fs));
-		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("rt refl water"), entries: &entries });
-		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("rt refl water"), bind_group_layouts: &[Some(water_layout), None, Some(&layout), Some(array_layout)], immediate_size: 0 });
-		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl water"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl water", water_shader(src, movers_shaded()).into())) });
+		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries });
+		HitGroup { layout, none: movers_none(device), bind: Default::default(), label }
+	}
+
+	/// The group for the level's structure `rt`, or None until it has hit data.
+	fn group(&self, device: &wgpu::Device, rt: &super::rtshadow::RtShadow) -> Option<wgpu::BindGroup> {
+		let (hit, hit_gen) = rt.hit()?;
+		let (mtex, mgen) = movers_tex(rt, &self.none);
+		let generation = (hit_gen, mgen);
+		let mut b = self.bind.borrow_mut();
+		if b.as_ref().is_none_or(|b| b.0 != generation) {
+			// trace_entries are bindings 3..5 of the mask pass's layout; here 0..2.
+			let mut entries: Vec<wgpu::BindGroupEntry> = rt.trace_entries().map(|e| wgpu::BindGroupEntry { binding: e.binding - 3, resource: e.resource }).into();
+			entries.extend(hit_entries(hit, mtex, 3));
+			*b = Some((generation, device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(self.label), layout: &self.layout, entries: &entries })));
+		}
+		b.as_ref().map(|b| b.1.clone())
+	}
+}
+
+/// Phase 3: the water's shading pass with traced reflections (`water_shader`), used in place of waterfx's own while Reflections
+/// are on and the level's structure has hit data.
+pub(super) struct Water {
+	hit: HitGroup,
+	/// The pipeline layout, the water module's source and the post scene's format, to build the pipeline for a setting.
+	pl: wgpu::PipelineLayout,
+	src: String,
+	format: wgpu::TextureFormat,
+	built: ForSetting<wgpu::RenderPipeline>,
+}
+
+impl Water {
+	/// None unless Reflections were on at start-up, the device traces and the bindless array exists (`array_layout`). `src`: the
+	/// water module's source, `water_layout` its group 0, `format` the post scene's.
+	pub(super) fn new(device: &wgpu::Device, src: &str, water_layout: &wgpu::BindGroupLayout, array_layout: Option<&wgpu::BindGroupLayout>, format: wgpu::TextureFormat) -> Option<Water> {
+		let array_layout = array_layout.filter(|_| wanted() && super::rtshadow::on())?;
+		let hit = HitGroup::new(device, "rt refl water");
+		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("rt refl water"), bind_group_layouts: &[Some(water_layout), None, Some(&hit.layout), Some(array_layout)], immediate_size: 0 });
+		let w = Water { hit, pl, src: src.to_string(), format, built: ForSetting::default() };
+		w.pipeline(device);
+		Some(w)
+	}
+
+	/// The traced shading pipeline for the setting now, None while Reflections are Off (the water then shades as before).
+	pub(super) fn pipeline(&self, device: &wgpu::Device) -> Option<wgpu::RenderPipeline> {
+		self.built.get(|| tracing().then(|| self.make(device)))
+	}
+
+	fn make(&self, device: &wgpu::Device) -> wgpu::RenderPipeline {
+		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl water"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl water", water_shader(&self.src, movers_shaded()).into())) });
 		let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 			label: Some("water shade rt"),
-			layout: Some(&pl),
+			layout: Some(&self.pl),
 			vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
-			fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_water"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
+			fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_water"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: self.format, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
 			primitive: Default::default(),
 			depth_stencil: None,
 			multisample: Default::default(),
@@ -508,22 +602,206 @@ impl Water {
 			(false, true) => "off the mirrored planes, with sun shadows, moving things and the lava, sludge and mud gloss",
 		};
 		eprintln!("rt reflections: water traced {where_} (reach {:.0}){}", reach(), if show() { ", traced pixels tinted (RAC_RT_REFL_SHOW)" } else { "" });
-		Some(Water { layout, pipeline, none: movers_none(device), bind: Default::default() })
+		pipeline
 	}
 
 	/// Group 2 for the level's structure `rt`, or None until it has hit data (the water then shades as before).
 	pub(super) fn group(&self, device: &wgpu::Device, rt: &super::rtshadow::RtShadow) -> Option<wgpu::BindGroup> {
-		let (hit, hit_gen) = rt.hit()?;
-		let (mtex, mgen) = movers_tex(rt, &self.none);
-		let generation = (hit_gen, mgen);
-		let mut b = self.bind.borrow_mut();
-		if b.as_ref().is_none_or(|b| b.0 != generation) {
-			// trace_entries are bindings 3..5 of the mask pass's layout; here 0..2.
-			let mut entries: Vec<wgpu::BindGroupEntry> = rt.trace_entries().map(|e| wgpu::BindGroupEntry { binding: e.binding - 3, resource: e.resource }).into();
-			entries.extend(hit_entries(hit, mtex, 3));
-			*b = Some((generation, device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("rt refl water"), layout: &self.layout, entries: &entries })));
+		self.hit.group(device, rt)
+	}
+}
+
+/// A traced pass's pipelines and the Reflections setting they were built for: built again when the setting changes (`cycle`),
+/// None where that setting does not trace the pass.
+struct ForSetting<T>(std::cell::RefCell<Option<(u8, Option<T>)>>);
+
+impl<T> Default for ForSetting<T> {
+	fn default() -> Self {
+		ForSetting(Default::default())
+	}
+}
+
+impl<T: Clone> ForSetting<T> {
+	fn get(&self, make: impl FnOnce() -> Option<T>) -> Option<T> {
+		let s = setting();
+		let mut b = self.0.borrow_mut();
+		if b.as_ref().is_none_or(|b| b.0 != s) {
+			*b = Some((s, make()));
 		}
-		b.as_ref().map(|b| b.1.clone())
+		b.as_ref().and_then(|b| b.1.clone())
+	}
+}
+
+/// How much of the chrome and glass the traced hit takes over from the retail environment texture: Balanced mixes the two (the
+/// env texture keeps the PS2's look of the metal), Ultra shows the hit alone.
+fn metal_mix() -> f32 {
+	match quality() {
+		Quality::Ultra => 1.0,
+		_ => 0.6,
+	}
+}
+
+const RT_METAL: &str = r#"
+// [PC] Ray-traced reflections (rtrefl.rs `Metal`, Balanced and up): chrome and glass (the metal packets, NOV-35b) with the level
+// they mirror. `env` is the retail environment texel (the PS2's fake chrome / glass picture); one ray along the mirror of the
+// view at the fragment finds what the metal really faces: the static world shaded as `rt_hit_colour` (with the sun's shadow at
+// the hit), a moving thing by its texture's mean, both fogged over the ray's own length. The metal is drawn inside the level
+// pass, so the picture is not there to take hits from. A miss, and far hits, keep `env`; a hit takes RT_MIX of the texel.
+fn rt_metal(i: VOut, env: vec3<f32>) -> vec3<f32> {
+	let ln = length(i.n);
+	if (ln < 1e-4) { return env; }
+	var n = i.n / ln;
+	let to = i.w - u.eye.xyz;
+	let dist = length(to);
+	let v = to / max(dist, 1e-4);
+	// A packet drawn without culling shows its back faces too: they mirror on their own side.
+	if (dot(n, v) > 0.0) { n = -n; }
+	let r = reflect(v, n);
+	let o = i.w + n * (0.02 + 0.002 * dist);
+	var rq: ray_query;
+	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_NONE, 0xffu, 0.02, RT_REACH, o, r));
+	while (rayQueryProceed(&rq)) {
+		if (rt_texel_casts(rayQueryGetCandidateIntersection(&rq))) {
+			rayQueryConfirmIntersection(&rq);
+		}
+	}
+	let h = rayQueryGetCommittedIntersection(&rq);
+	if (h.kind == RAY_QUERY_INTERSECTION_NONE) { return rt_metal_shown(env, vec3<f32>(0.0, 0.2, 1.0)); }
+	var col: vec3<f32>;
+	if (h.instance_custom_data == 0u) {
+		// One pixel's footprint at the hit grows with the whole path (a curved mirror spreads it more; kept simple).
+		let pix = 2.0 / max(abs(u.view_proj[1][1]), 1e-4) / RT_HEIGHT;
+		var shadow = 0.0;
+		if (u.sun.w > 0.0) {
+			shadow = RT_STRENGTH * min(u.sun.w * 1.4, 1.0) * rt_ray(o + r * h.t, -normalize(u.sun.xyz), 0.03 + 0.004 * (dist + h.t));
+		}
+		col = rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix, shadow);
+	} else {
+		col = rt_mover_colour(h.geometry_index, h.primitive_index);
+	}
+	// The level's fog over the ray's own length (the fragment's own fog over the eye's path is laid on after, as on any moby).
+	let f = clamp(u.fog.z + (h.t - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
+	col = mix(u.fog_colour.rgb, col, f);
+	let far = smoothstep(RT_REACH * 0.5, RT_REACH, h.t);
+	return rt_metal_shown(mix(env, col, RT_MIX * (1.0 - far)), vec3<f32>(1.0, 0.1, 0.0));
+}
+
+// RAC_RT_REFL_SHOW=1 (dev): the traced metal tinted as the water is: red where a hit was shaded, blue where nothing was hit.
+fn rt_metal_shown(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
+	return mix(c, tint, RT_SHOW * 0.7);
+}
+"#;
+
+/// The level shader lines where the metal faces' texel is read, the opaque `fs` and the blended `moby_rgba` (`fs_moby_a` / `_b`),
+/// and what they become in the metal module (the texel's colour through `rt_metal`).
+const METAL_HOOKS: [(&str, &str); 2] = [
+	("\tif (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }\n\tif (c.a < 0.25) { discard; }\n", "\tif (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }\n\tif (c.a < 0.25) { discard; }\n\tc = vec4<f32>(rt_metal(i, c.rgb), c.a);\n"),
+	("\tlet c = moby_texel(i);\n\tvar rgb = c.rgb * i.c.rgb * sun_lit(i);\n", "\tlet c = moby_texel(i);\n\tvar rgb = rt_metal(i, c.rgb) * i.c.rgb * sun_lit(i);\n"),
+];
+
+/// The level shader `src` (as the device runs it, rtshadow.rs `level`) for the metal faces: `rt_metal` on their texel. The level's
+/// structure and alpha tables are group 2 bindings 0..2, unless the shadow receivers' shader already declares them in group 0
+/// (the bind group carries them either way), the hit data from group 2 binding 3, the bindless texture array as group 3.
+/// `height`: the window's height in pixels (a ray's footprint).
+fn metal_shader(src: &str, height: f32) -> String {
+	let mut src = src.to_string();
+	for (from, to) in METAL_HOOKS {
+		assert!(src.contains(from), "rt reflections: the level shader has no metal texel line {from:?}");
+		src = src.replacen(from, to, 1);
+	}
+	let flag = |on: bool| if on { "1.0" } else { "0.0" };
+	let rt = RT_METAL
+		.replace("RT_REACH", &format!("{:.1}", reach()))
+		.replace("RT_SHOW", flag(show()))
+		.replace("RT_MIX", &format!("{:.3}", metal_mix()))
+		.replace("RT_HEIGHT", &format!("{:.1}", height.max(1.0)))
+		.replace("RT_STRENGTH", &format!("{:.3}", super::sunshadow::STRENGTH));
+	// The shadow receivers' level shader already has the structure, the alpha tables and the ray code (rtshadow.rs `shader`).
+	let (head, decls) = match src.starts_with("enable wgpu_ray_query;") {
+		true => ("enable wgpu_binding_array;\n", String::new()),
+		false => ("enable wgpu_ray_query;\nenable wgpu_binding_array;\n", format!("@group(2) @binding(0) var sun_tlas: acceleration_structure;\n@group(2) @binding(1) var<storage, read> rt_tris: array<vec4<u32>>;\n@group(2) @binding(2) var<storage, read> rt_bits: array<u32>;\n{}", super::rtshadow::rt_fns())),
+	};
+	// The level shader has its own `samp` (group 1): the bindless array's sampler goes by another name here.
+	let hit = hit_wgsl(2, 3, 3).replace("var samp: sampler", "var rt_samp: sampler").replace("], samp,", "], rt_samp,");
+	format!("{head}{src}\n{decls}{hit}{rt}")
+}
+
+/// Phase 6: the props' chrome and glass (gpu/metal.rs) drawn with traced reflections (`metal_shader`) in place of the level
+/// pipelines they use otherwise, from Balanced on, once the level's structure has hit data.
+pub(super) struct Metal {
+	hit: HitGroup,
+	/// The pipeline layout, the level shader as the device runs it, the level pass's targets and the window's height, to build
+	/// the pipelines for a setting.
+	pl: wgpu::PipelineLayout,
+	src: String,
+	format: wgpu::TextureFormat,
+	depth: wgpu::TextureFormat,
+	height: f32,
+	built: ForSetting<MetalPipelines>,
+}
+
+#[derive(Clone)]
+pub(super) struct MetalPipelines {
+	/// The opaque pass's states (as `pipeline`, then `pipeline_cull` back and front).
+	pub opaque: [wgpu::RenderPipeline; 3],
+	/// The ABE pass's states (as `moby_pipelines`).
+	pub blend: [wgpu::RenderPipeline; 2],
+}
+
+impl Metal {
+	/// None unless Reflections were on at start-up, the device traces and the bindless array exists (`array_layout`). `src`: the
+	/// level shader as the device runs it, `ulayout` / `tex_layout` its groups 0 and 1, `format` / `depth` the level pass's
+	/// targets, `height` the window's height.
+	#[allow(clippy::too_many_arguments)]
+	pub(super) fn new(device: &wgpu::Device, src: &str, ulayout: &wgpu::BindGroupLayout, tex_layout: &wgpu::BindGroupLayout, array_layout: Option<&wgpu::BindGroupLayout>, format: wgpu::TextureFormat, depth: wgpu::TextureFormat, height: f32) -> Option<Metal> {
+		let array_layout = array_layout.filter(|_| wanted() && super::rtshadow::on())?;
+		let hit = HitGroup::new(device, "rt refl metal");
+		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("rt refl metal"), bind_group_layouts: &[Some(ulayout), Some(tex_layout), Some(&hit.layout), Some(array_layout)], immediate_size: 0 });
+		let m = Metal { hit, pl, src: src.to_string(), format, depth, height, built: ForSetting::default() };
+		m.pipelines(device);
+		Some(m)
+	}
+
+	/// The traced pipelines for the setting now, None below Balanced (the metal then draws as before).
+	pub(super) fn pipelines(&self, device: &wgpu::Device) -> Option<MetalPipelines> {
+		self.built.get(|| movers_shaded().then(|| self.make(device)))
+	}
+
+	fn make(&self, device: &wgpu::Device) -> MetalPipelines {
+		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl metal"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl metal", metal_shader(&self.src, self.height).into())) });
+		let make = |fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>| {
+			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+				label: Some("metal rt"),
+				layout: Some(&self.pl),
+				vertex: wgpu::VertexState {
+					module: &module,
+					entry_point: Some("vs"),
+					compilation_options: Default::default(),
+					buffers: &[Some(wgpu::VertexBufferLayout {
+						array_stride: std::mem::size_of::<Vertex>() as u64,
+						step_mode: wgpu::VertexStepMode::Vertex,
+						attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3, 3 => Float32x4, 4 => Float32x4],
+					})],
+				},
+				fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(fs), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: self.format, blend, write_mask: wgpu::ColorWrites::ALL })] }),
+				primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
+				depth_stencil: Some(wgpu::DepthStencilState { format: self.depth, depth_write_enabled: Some(depth_write), depth_compare: Some(compare), stencil: Default::default(), bias: Default::default() }),
+				multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+				multiview_mask: None,
+				cache: None,
+			})
+		};
+		let z = super::gs_state::ztest();
+		let opaque = [None, Some(wgpu::Face::Back), Some(wgpu::Face::Front)].map(|c| make("fs", None, true, z, c));
+		let ab = Some(wgpu::BlendState::ALPHA_BLENDING);
+		let blend = [make("fs_moby_a", ab, true, wgpu::CompareFunction::LessEqual, None), make("fs_moby_b", ab, false, wgpu::CompareFunction::LessEqual, None)];
+		eprintln!("rt reflections: chrome and glass traced ({:.0}% over the env texture, reach {:.0})", metal_mix() * 100.0, reach());
+		MetalPipelines { opaque, blend }
+	}
+
+	/// Group 2 for the level's structure `rt`, or None until it has hit data (the metal then draws as before).
+	pub(super) fn group(&self, device: &wgpu::Device, rt: &super::rtshadow::RtShadow) -> Option<wgpu::BindGroup> {
+		self.hit.group(device, rt)
 	}
 }
 
@@ -538,6 +816,13 @@ mod tests {
 		for balanced in [false, true] {
 			let m = naga::front::wgsl::parse_str(&super::water_shader(&src, balanced)).unwrap_or_else(|e| panic!("rt refl water wgsl parse (balanced {balanced}): {e}"));
 			naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("rt refl water wgsl validate (balanced {balanced}): {e:?}"));
+		}
+		// The traced chrome and glass, over the plain level shader and over the shadow receivers' one.
+		let level = super::super::volfog::soft::level_source(super::super::SHADER, false);
+		for shadows in [false, true] {
+			let src = if shadows { super::super::rtshadow::shader(&level) } else { level.clone() };
+			let m = naga::front::wgsl::parse_str(&super::metal_shader(&src, 1440.0)).unwrap_or_else(|e| panic!("rt refl metal wgsl parse (shadows {shadows}): {e}"));
+			naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("rt refl metal wgsl validate (shadows {shadows}): {e:?}"));
 		}
 	}
 }

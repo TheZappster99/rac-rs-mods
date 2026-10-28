@@ -218,6 +218,10 @@ impl ApplicationHandler for App {
 				}
 				// Held keys are tracked everywhere (the Sound page steps volume while Left/Right is held).
 				self.key_change(k, event.state == ElementState::Pressed, event.repeat);
+				// [PC] Ray-traced reflections (rtrefl.rs): Insert steps the Reflections quality for this session, to compare them live.
+				if k == KeyCode::Insert && event.state == ElementState::Pressed && !event.repeat && self.retail.is_some() {
+					super::rtrefl::cycle();
+				}
 				// Retail + modern camera: F7 toggles it (retail/modcam.rs).
 				if k == KeyCode::F7 && event.state == ElementState::Pressed && !event.repeat && self.retail.is_some() && crate::retail::modcam::enabled() {
 					crate::retail::modcam::ui_toggle();

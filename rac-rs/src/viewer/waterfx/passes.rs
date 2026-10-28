@@ -291,10 +291,10 @@ impl WaterFx {
 			multiview_mask: None,
 		});
 		// [PC] Ray-traced reflections (rtrefl.rs): the traced shading once the level's structure has hit data.
-		let traced = self.rt.as_ref().zip(rt).and_then(|(w, (device, rt, array))| Some((w, w.group(device, rt)?, array)));
+		let traced = self.rt.as_ref().zip(rt).and_then(|(w, (device, rt, array))| Some((w.pipeline(device)?, w.group(device, rt)?, array)));
 		match &traced {
-			Some((w, g, array)) => {
-				pass.set_pipeline(&w.pipeline);
+			Some((p, g, array)) => {
+				pass.set_pipeline(p);
 				pass.set_bind_group(2, g, &[]);
 				pass.set_bind_group(3, *array, &[]);
 			}
