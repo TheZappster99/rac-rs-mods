@@ -146,10 +146,12 @@ impl Gpu {
 				}
 				// [PC] Volumetric fog (volfog.rs): after the water pass, before bloom and the grade; not under water (its own look).
 				let fog = super::volfog::Input::new(&self.post, &self.sun, dc.sun.as_ref(), self.ocean_draws.iter().flat_map(|s| s.pos.iter().map(|p| p[2])), &gfx, u, (self.level, self.config.width, self.config.height), (cam, aspect, wfar), under_in.as_ref().is_none_or(|f| !f.flag) && !self.under.active() && !scene.warp_shown && !self.ship_fight, &self.sun_rows()); let fog = fog.map(|mut f| { f.water = water.then(|| self.waterfx.gi_mask().map(|m| m.0)).flatten(); f });
+				// [PC] Ray-traced reflections (rtrefl.rs): the water traces through the level's structure with the scene's textures.
+				let rt_water = self.sun.rt.as_ref().zip(scene.tex_array.as_ref()).map(|(rt, array)| (&self.device, rt, array));
 				let (volfog, under, device, queue, depth) = (&mut self.volfog, &mut self.under, &self.device, &self.queue, &self.depth);
 				self.post.encode(&self.queue, &mut enc, cam, aspect, gfx.ao_q, gfx.sun_q, gfx.particles_q, part_on, &fx_lights, rays, dfx.rt_rays.is_some(), gi_level, wfar, |enc, scene, ao| {
 					if water {
-						waterfx.shade(enc, scene, ao, fall_tex);
+						waterfx.shade(enc, scene, ao, fall_tex, rt_water);
 					}
 					if let Some(fog) = &fog { volfog.run(device, queue, enc, fog, depth); }
 					if let Some(uf) = &under_in {

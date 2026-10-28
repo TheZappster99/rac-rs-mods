@@ -105,6 +105,8 @@ pub(super) struct WaterFx {
 	sampler: wgpu::Sampler,
 	p_pos: wgpu::RenderPipeline,
 	p_shade: wgpu::RenderPipeline,
+	/// [PC] Ray-traced reflections (rtrefl.rs `Water`): `p_shade` with traced reflections where the screen-space ones miss.
+	rt: Option<super::rtrefl::Water>,
 	p_ao_sea: wgpu::RenderPipeline,
 	dummy: wgpu::TextureView,
 	/// The same as an array view (the mirror slot).

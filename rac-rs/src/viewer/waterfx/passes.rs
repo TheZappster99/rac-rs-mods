@@ -263,8 +263,9 @@ impl WaterFx {
 	}
 
 	/// Inside the post chain (after the occlusion, before the bloom): shades the water pixels of the post scene `scene`;
-	/// `fall_tex`: the bind group of the level's waterfall texture (`fall_fx_tex`), if any.
-	pub(in crate::viewer) fn shade(&self, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, ao: Option<&wgpu::TextureView>, fall_tex: Option<&wgpu::BindGroup>) {
+	/// `fall_tex`: the bind group of the level's waterfall texture (`fall_fx_tex`), if any. `rt`: the level's ray-tracing
+	/// structure and the scene's bindless texture group, for the traced reflections (rtrefl.rs `Water`) while Reflections are on.
+	pub(in crate::viewer) fn shade(&self, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, ao: Option<&wgpu::TextureView>, fall_tex: Option<&wgpu::BindGroup>, rt: Option<(&wgpu::Device, &crate::viewer::rtshadow::RtShadow, &wgpu::BindGroup)>) {
 		let Some(t) = &self.t else { return };
 		// [PC] No screen-space occlusion on the far open sea (`fs_ao_sea`).
 		if let Some(ao) = ao {
@@ -289,7 +290,16 @@ impl WaterFx {
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});
-		pass.set_pipeline(&self.p_shade);
+		// [PC] Ray-traced reflections (rtrefl.rs): the traced shading once the level's structure has hit data.
+		let traced = self.rt.as_ref().zip(rt).and_then(|(w, (device, rt, array))| Some((w, w.group(device, rt)?, array)));
+		match &traced {
+			Some((w, g, array)) => {
+				pass.set_pipeline(&w.pipeline);
+				pass.set_bind_group(2, g, &[]);
+				pass.set_bind_group(3, *array, &[]);
+			}
+			None => pass.set_pipeline(&self.p_shade),
+		}
 		pass.set_bind_group(0, &t.g_shade, &[]);
 		pass.draw(0..3, 0..1);
 		if let Some((vb, ib, n)) = &self.fall {

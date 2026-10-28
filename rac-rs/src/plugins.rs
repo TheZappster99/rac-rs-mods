@@ -69,7 +69,7 @@ impl Plugin for RayTracing {
 		"Ray tracing"
 	}
 	fn description(&self) -> &'static str {
-		"Effects traced by the graphics card, each switched in the settings. Shadows: sharper, more exact sun shadows. Sun rays: shafts of sunlight in the air, in place of the usual Sun rays. Reflections: water and shiny metal reflect the real level, even things off screen or behind you; Performance only fills in what the usual reflections miss and costs little, Balanced and Ultra trace more and cost more (in development: no change on screen yet). Needs Vulkan and a graphics card with ray tracing, and Lighting Enhanced with Dynamic shadows on. Built into the game."
+		"Effects traced by the graphics card, each switched in the settings. Shadows: sharper, more exact sun shadows. Sun rays: shafts of sunlight in the air, in place of the usual Sun rays. Reflections: water and shiny metal reflect the real level, even things off screen or behind you; Performance only fills in what the usual reflections miss and costs little, Balanced and Ultra trace more and cost more (in development: water only so far, and Balanced and Ultra still look like Performance). Needs Vulkan and a graphics card with ray tracing, and Lighting Enhanced with Dynamic shadows on. Built into the game."
 	}
 	fn env_force(&self) -> Option<&'static str> {
 		Some("RAC_RAY_TRACING")

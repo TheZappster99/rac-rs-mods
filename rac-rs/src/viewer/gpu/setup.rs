@@ -32,6 +32,8 @@ impl Gpu {
 		if !rt.is_empty() {
 			desc.required_features |= rt;
 			desc.required_limits = desc.required_limits.clone().using_acceleration_structure_values(adapter.limits());
+			// The traced water (rtrefl.rs `Water`) reads 9 storage buffers in its fragment stage (the default limit is 8).
+			desc.required_limits.max_storage_buffers_per_shader_stage = desc.required_limits.max_storage_buffers_per_shader_stage.max(adapter.limits().max_storage_buffers_per_shader_stage.min(16));
 			// SAFETY: the opt-in only unlocks the EXPERIMENTAL_* features; rtshadow.rs is the one user and stays behind its switch.
 			desc.experimental_features = unsafe { wgpu::ExperimentalFeatures::enabled() };
 		}
@@ -450,7 +452,7 @@ impl Gpu {
 		};
 		let (item_panel, popup_panel, portrait_panel) = (new_panel(), new_panel(), new_panel());
 		let post = super::post::Post::new(&device, config.format); let volfog = super::volfog::VolFog::new(config.format, &ulayout); let volclouds = super::volclouds::VolClouds::new(config.format, depth_format);
-		let waterfx = super::waterfx::WaterFx::new(&device, config.format, depth_format, &tex_layout);
+		let waterfx = super::waterfx::WaterFx::new(&device, config.format, depth_format, &tex_layout, bindless.as_ref().map(|b| &b.layout));
 		let under = super::underwater::Under::new(&device, config.format);
 		let partfx = super::partfx::PartFx::new(&device, &shader, &ulayout, &tex_layout, config.format, depth_format);
 		let veg = super::vegfx::VegFx::new(&device, &ulayout, &tex_layout, config.format, depth_format);

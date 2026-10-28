@@ -4,7 +4,7 @@
 use super::*;
 
 impl WaterFx {
-	pub(in crate::viewer) fn new(device: &wgpu::Device, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat, tex_layout: &wgpu::BindGroupLayout) -> WaterFx {
+	pub(in crate::viewer) fn new(device: &wgpu::Device, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat, tex_layout: &wgpu::BindGroupLayout, rt_array: Option<&wgpu::BindGroupLayout>) -> WaterFx {
 		// RAC_WATER_DBG=N (dev aid, off by default): fs_water returns one of its inputs as a colour (seam hunting).
 		let dbg = match std::env::var("RAC_WATER_DBG").ok().and_then(|v| v.parse::<u32>().ok()) {
 			Some(1) => "return vec4<f32>(clamp(thick / 4.0, 0.0, 1.0), select(0.0, 1.0, blended), fract((p.z - 223.0) * 50.0), 1.0);",
@@ -15,7 +15,7 @@ impl WaterFx {
 			_ => "",
 		};
 		let src = SHADER.replace("//DBGHOOK", dbg) + &skymap::wgsl(12, 13) + edge_calm::EDGE_WGSL + far_look::FAR_WGSL + steep_look::STEEP_WGSL + shore_fade::SHORE_FADE_WGSL + shore_map::SHORE_DIST_WGSL + hero_crest::HERO_CREST_WGSL + rim::RIM_WGSL + underside::UNDER_WGSL + dry_tiles::DRY_WGSL;
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("water fx"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("water fx", src.into())) });
+		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("water fx"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("water fx", src.clone().into())) });
 		let tex = |binding: u32, sample_type: wgpu::TextureSampleType, multisampled: bool| wgpu::BindGroupLayoutEntry {
 			binding,
 			visibility: wgpu::ShaderStages::FRAGMENT,
@@ -179,12 +179,15 @@ impl WaterFx {
 				.create_texture(&wgpu::TextureDescriptor { label: Some("water fx dummy"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] })
 				.create_view(&Default::default())
 		};
+		// [PC] Ray-traced reflections (rtrefl.rs): the shading pass again, tracing where the screen-space reflection misses.
+		let rt = crate::viewer::rtrefl::Water::new(device, &src, &layout, rt_array, format);
 		WaterFx {
 			layout,
 			ubuf: device.create_buffer(&wgpu::BufferDescriptor { label: Some("water fx uniforms"), size: std::mem::size_of::<WaterU>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
 			sampler: device.create_sampler(&wgpu::SamplerDescriptor { label: Some("water fx linear"), mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..Default::default() }),
 			p_pos,
 			p_shade,
+			rt,
 			p_ao_sea,
 			dummy: small(format),
 			dummy_arr: device

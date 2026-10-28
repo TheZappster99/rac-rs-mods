@@ -51,7 +51,7 @@ pub(super) fn announce(traces: bool) {
 		return;
 	}
 	match traces {
-		true => eprintln!("rt reflections: on, quality {:?} (phase 2: hit shading, shown only by RAC_POST_VIEW=rtrefl)", quality()),
+		true => eprintln!("rt reflections: on, quality {:?} (phase 3: water only)", quality()),
 		false => eprintln!("rt reflections: switched on, but the adapter has no ray queries on Vulkan: off"),
 	}
 }
@@ -62,14 +62,14 @@ pub(super) fn debug_view() -> bool {
 	*V.get_or_init(|| std::env::var("RAC_POST_VIEW").is_ok_and(|v| v == "rtrefl"))
 }
 
-/// The hit data's bindings (rtshadow.rs `Hit`) from group 0 binding `base` on (7 bindings), and the bindless texture array as
-/// group 1 (bindless.rs, its layout), with the shading of a static-world hit.
-fn hit_wgsl(base: u32) -> String {
+/// The hit data's bindings (rtshadow.rs `Hit`) in `group` from binding `base` on (7 bindings), and the bindless texture array as
+/// group `tex_group` (bindless.rs, its layout), with the shading of a static-world hit.
+fn hit_wgsl(group: u32, base: u32, tex_group: u32) -> String {
 	let mut s = String::new();
 	for (k, decl) in ["var<storage, read> rt_idx: array<u32>", "var<storage, read> rt_tex: array<u32>", "var<uniform> rt_geo: array<vec4<u32>, 8>", "var<storage, read> rt_v0: array<f32>", "var<storage, read> rt_v1: array<f32>", "var<storage, read> rt_v2: array<f32>", "var<storage, read> rt_v3: array<f32>"].iter().enumerate() {
-		s += &format!("@group(0) @binding({}) {decl};\n", base + k as u32);
+		s += &format!("@group({group}) @binding({}) {decl};\n", base + k as u32);
 	}
-	s += &format!("@group(1) @binding(0) var texs: binding_array<texture_2d<f32>, {}>;\n@group(1) @binding(1) var samp: sampler;\n", super::bindless::TEX_CAP);
+	s += &format!("@group({tex_group}) @binding(0) var texs: binding_array<texture_2d<f32>, {}>;\n@group({tex_group}) @binding(1) var samp: sampler;\n", super::bindless::TEX_CAP);
 	s + &RT_HIT.replace("TEX_LAST", &format!("{}u", super::bindless::TEX_CAP - 1))
 }
 
@@ -108,7 +108,7 @@ fn rt_vpos(src: u32, b: u32) -> vec3<f32> {
 fn rt_hit_colour(geo: u32, prim: u32, bc: vec2<f32>, foot: f32) -> vec3<f32> {
 	let g = rt_geo[min(geo, 7u)];
 	let first = g.x + prim * 3u;
-	let w = array<f32, 3>(1.0 - bc.x - bc.y, bc.x, bc.y);
+	let bw = array<f32, 3>(1.0 - bc.x - bc.y, bc.x, bc.y);
 	var b: array<u32, 3>;
 	var uvs: array<vec2<f32>, 3>;
 	var uv = vec2<f32>(0.0);
@@ -116,8 +116,8 @@ fn rt_hit_colour(geo: u32, prim: u32, bc: vec2<f32>, foot: f32) -> vec3<f32> {
 	for (var k = 0u; k < 3u; k++) {
 		b[k] = rt_idx[first + k] * 16u;
 		uvs[k] = vec2<f32>(rt_vf(g.y, b[k] + 3u), rt_vf(g.y, b[k] + 4u));
-		uv += uvs[k] * w[k];
-		c += vec3<f32>(rt_vf(g.y, b[k] + 8u), rt_vf(g.y, b[k] + 9u), rt_vf(g.y, b[k] + 10u)) * w[k];
+		uv += uvs[k] * bw[k];
+		c += vec3<f32>(rt_vf(g.y, b[k] + 8u), rt_vf(g.y, b[k] + 9u), rt_vf(g.y, b[k] + 10u)) * bw[k];
 	}
 	let slot = min(rt_tex[first / 3u], TEX_LAST);
 	let dim = vec2<f32>(textureDimensions(texs[slot]));
@@ -172,7 +172,7 @@ struct DbgU { eye: vec4<f32>, f: vec4<f32>, r: vec4<f32>, u: vec4<f32>, size: ve
 
 /// The dev view's shader: `RT_DEBUG`, the hit data from binding 5 and the shared ray code (rtshadow.rs `rt_fns`).
 fn debug_shader() -> String {
-	format!("enable wgpu_ray_query;\nenable wgpu_binding_array;\n{RT_DEBUG}{}{}", hit_wgsl(5), super::rtshadow::rt_fns())
+	format!("enable wgpu_ray_query;\nenable wgpu_binding_array;\n{RT_DEBUG}{}{}", hit_wgsl(0, 5, 1), super::rtshadow::rt_fns())
 }
 
 /// The dev view's camera (`DbgU` in the shader): eye (w: the reach), forward, right x horizontal tan, up x vertical tan,
@@ -256,6 +256,133 @@ impl Debug {
 		pass.set_bind_group(0, bind, &[]);
 		pass.set_bind_group(1, array, &[]);
 		pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+	}
+}
+
+/// How far a reflected ray looks for something to reflect (world units), by quality: beyond it the far-air guess stays.
+fn reach() -> f32 {
+	match quality() {
+		Quality::Performance => 60.0,
+		Quality::Balanced => 120.0,
+		Quality::Ultra => 200.0,
+	}
+}
+
+/// The water shader's line after which the traced reflection replaces the far-air guess (waterfx/shader.rs `fs_water`).
+const WATER_HOOK: &str = "\tlet hit = reflect_ray(p + gsm * 0.02, rr, jit);\n\tvar refl = env(r, base);\n";
+
+const RT_WATER: &str = r#"
+// [PC] Ray-traced reflections (rtrefl.rs `Water`): the pixel lies on a plane the planar mirror draws (mirror.rs), as `fs_water`
+// picks its layer; the mirror's image wins there, so nothing is traced.
+fn rt_on_mirror(pf: vec3<f32>, gz: f32) -> bool {
+	if (w.mirror.y < 0.5 || gz <= 0.96) { return false; }
+	return abs(pf.z - w.mirror.x) < 0.4 || (w.mirror2.z > 1.5 && abs(pf.z - w.mirror2.x) < 0.4) || (w.mirror2.z > 2.5 && abs(pf.z - w.mirror2.y) < 0.4);
+}
+
+// [PC] Ray-traced reflections, Performance (rtrefl.rs `Water`): where the screen-space march found nothing sure (`ssr` < 1) and no
+// mirrored plane lies under the pixel, the reflected ray `r` from `o` traced through the static world; `fallback`, the far-air
+// guess, becomes what it hits (linear light, far hits fading back into the guess). A miss or a moving thing keeps the guess.
+// `dist`: the eye's distance to the surface (the footprint at the hit grows with the whole path).
+fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<f32>, gz: f32, dist: f32) -> vec3<f32> {
+	if (RT_FORCE < 0.5 && (ssr > 0.99 || rt_on_mirror(pf, gz))) { return fallback; }
+	var rq: ray_query;
+	rayQueryInitialize(&rq, sun_tlas, RayDesc(RAY_FLAG_NONE, 0x01u, 0.05, RT_REACH, o, r));
+	while (rayQueryProceed(&rq)) {
+		if (rt_texel_casts(rayQueryGetCandidateIntersection(&rq))) {
+			rayQueryConfirmIntersection(&rq);
+		}
+	}
+	let h = rayQueryGetCommittedIntersection(&rq);
+	if (h.kind == RAY_QUERY_INTERSECTION_NONE || h.instance_custom_data != 0u) { return rt_shown(fallback, vec3<f32>(0.0, 0.2, 1.0)); }
+	let pix = 2.0 * w.proj.y * w.size.w;
+	let col = to_linear(rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix));
+	return rt_shown(mix(col, fallback, smoothstep(RT_REACH * 0.5, RT_REACH, h.t)), vec3<f32>(1.0, 0.1, 0.0));
+}
+
+// RAC_RT_REFL_SHOW=1 (dev): the traced pixels tinted, red where the ray hit something, blue where it found nothing (RT_SHOW 1).
+fn rt_shown(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
+	return mix(c, tint, RT_SHOW * 0.7);
+}
+"#;
+
+/// Dev only: RAC_RT_REFL_SHOW=1 tints the water pixels that traced (`rt_shown`), to see where the traced reflection applies.
+fn show() -> bool {
+	std::env::var("RAC_RT_REFL_SHOW").is_ok_and(|v| v == "1")
+}
+
+/// Dev only: RAC_RT_REFL_FORCE=1 traces every water pixel (`rt_water`), even where the screen-space reflection or the planar
+/// mirror has it: the traced reflection can then be held against the mirror's on any water.
+fn force() -> bool {
+	std::env::var("RAC_RT_REFL_FORCE").is_ok_and(|v| v == "1")
+}
+
+/// The water shader `src` (waterfx/setup.rs) with `rt_water` after the far-air guess of `fs_water`: the structure and the alpha
+/// tables at group 2 bindings 0..2, the hit data from binding 3, the bindless texture array as group 3.
+fn water_shader(src: &str) -> String {
+	assert!(src.contains(WATER_HOOK), "rt reflections: fs_water has no reflect_ray / env lines to hook");
+	let mut src = src.replacen(WATER_HOOK, &format!("{WATER_HOOK}\trefl = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist);\n"), 1);
+	// RAC_RT_REFL_FORCE: the traced reflection alone, so neither the screen-space one nor the mirror's image is laid over it.
+	if force() {
+		const SSR: &str = "\tif (hit.w > 0.0) {\n\t\tlet bend";
+		const MIRROR: &str = "if (w.mirror.y > 0.5 && g.z > 0.96) {";
+		assert!(src.contains(SSR) && src.contains(MIRROR), "rt reflections: fs_water has no screen-space / mirror lines to switch off");
+		src = src.replacen(SSR, "\tif (false) {\n\t\tlet bend", 1).replacen(MIRROR, "if (false) {", 1);
+	}
+	let decls = "@group(2) @binding(0) var sun_tlas: acceleration_structure;\n@group(2) @binding(1) var<storage, read> rt_tris: array<vec4<u32>>;\n@group(2) @binding(2) var<storage, read> rt_bits: array<u32>;\n";
+	format!("enable wgpu_ray_query;\nenable wgpu_binding_array;\n{src}\n{decls}{}{}{}", hit_wgsl(2, 3, 3), super::rtshadow::rt_fns(), RT_WATER.replace("RT_REACH", &format!("{:.1}", reach())).replace("RT_SHOW", if show() { "1.0" } else { "0.0" }).replace("RT_FORCE", if force() { "1.0" } else { "0.0" }))
+}
+
+/// Phase 3: the water's shading pass with traced reflections (`water_shader`), used in place of waterfx's own while Reflections
+/// are on and the level's structure has hit data.
+pub(super) struct Water {
+	layout: wgpu::BindGroupLayout,
+	pub pipeline: wgpu::RenderPipeline,
+	/// Group 2, for the structure's hit generation.
+	bind: std::cell::RefCell<Option<(u64, wgpu::BindGroup)>>,
+}
+
+impl Water {
+	/// None unless Reflections are on, the device traces and the bindless array exists (`array_layout`). `src`: the water
+	/// module's source, `water_layout` its group 0, `format` the post scene's.
+	pub(super) fn new(device: &wgpu::Device, src: &str, water_layout: &wgpu::BindGroupLayout, array_layout: Option<&wgpu::BindGroupLayout>, format: wgpu::TextureFormat) -> Option<Water> {
+		let array_layout = array_layout.filter(|_| wanted() && super::rtshadow::on())?;
+		let fs = wgpu::ShaderStages::FRAGMENT;
+		let storage = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None };
+		let mut entries = vec![
+			wgpu::BindGroupLayoutEntry { binding: 0, visibility: fs, ty: wgpu::BindingType::AccelerationStructure { vertex_return: false }, count: None },
+			wgpu::BindGroupLayoutEntry { binding: 1, visibility: fs, ty: storage, count: None },
+			wgpu::BindGroupLayoutEntry { binding: 2, visibility: fs, ty: storage, count: None },
+		];
+		entries.extend(hit_layout(3, fs));
+		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("rt refl water"), entries: &entries });
+		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("rt refl water"), bind_group_layouts: &[Some(water_layout), None, Some(&layout), Some(array_layout)], immediate_size: 0 });
+		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl water"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl water", water_shader(src).into())) });
+		let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+			label: Some("water shade rt"),
+			layout: Some(&pl),
+			vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
+			fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_water"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
+			primitive: Default::default(),
+			depth_stencil: None,
+			multisample: Default::default(),
+			multiview_mask: None,
+			cache: None,
+		});
+		eprintln!("rt reflections: water traced {} (reach {:.0}){}", if force() { "everywhere (RAC_RT_REFL_FORCE)" } else { "where the screen-space reflection misses" }, reach(), if show() { ", traced pixels tinted (RAC_RT_REFL_SHOW)" } else { "" });
+		Some(Water { layout, pipeline, bind: Default::default() })
+	}
+
+	/// Group 2 for the level's structure `rt`, or None until it has hit data (the water then shades as before).
+	pub(super) fn group(&self, device: &wgpu::Device, rt: &super::rtshadow::RtShadow) -> Option<wgpu::BindGroup> {
+		let (hit, generation) = rt.hit()?;
+		let mut b = self.bind.borrow_mut();
+		if b.as_ref().is_none_or(|b| b.0 != generation) {
+			// trace_entries are bindings 3..5 of the mask pass's layout; here 0..2.
+			let mut entries: Vec<wgpu::BindGroupEntry> = rt.trace_entries().map(|e| wgpu::BindGroupEntry { binding: e.binding - 3, resource: e.resource }).into();
+			entries.extend(hit_entries(hit, 3));
+			*b = Some((generation, device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("rt refl water"), layout: &self.layout, entries: &entries })));
+		}
+		b.as_ref().map(|b| b.1.clone())
 	}
 }
 
