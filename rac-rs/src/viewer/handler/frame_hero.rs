@@ -75,11 +75,13 @@ impl App {
 					follow::capture(&q.follow, mats.len(), |j| norm_cols(a.joint_world(&mats, j)));
 				}
 				// Clank, the packs and the head items retail hangs on its own pose follow the drawn one: the limp body, or the strafe draw.
-				let fix = match ragdoll_logic.as_ref().or(board_logic.as_ref()) {
-					Some(logic) => crate::retail::strafe::pose_fix_between(a, &mats, logic),
-					None => rparts.and_then(|q| strafe_fix(&self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats)),
-				};
-				self.smooth.set_pose_fix(fix);
+				if !(hero_check && self.smooth.ticks == 0) { // once per tick: RAC_HERO_CHECK=1 poses every display frame
+					let fix = match ragdoll_logic.as_ref().or(board_logic.as_ref()) {
+						Some(logic) => crate::retail::strafe::pose_fix_between(a, &mats, logic),
+						None => rparts.and_then(|q| strafe_fix(&mut self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats)),
+					};
+					self.smooth.set_pose_fix(fix);
+				}
 				// The held weapon follows the drawn pose too: the limp body, or the riding stance.
 				self.smooth.set_limp(ragdoll_logic.is_some() || board_logic.is_some());
 				// HELD-GLOVE: a glove in hand (FUN_0020d018) is posed from the hero's own live local joints, not its clock.

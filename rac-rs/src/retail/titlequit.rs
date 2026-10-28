@@ -9,16 +9,16 @@
 //! sees the front end's page pointer reach it (`front_field`) and the window closes (viewer/handler.rs), as its close
 //! button would. The label is retail's own "Quit Game" (0x4f26, the pause menu's row), so it is in every language.
 //!
-//! Reserved RAM: `RANGE`, inside pcext's BASE window (the menu reader accepts it; the canary of prompts.rs skips it).
+//! Reserved RAM: `RANGE`, inside pcext's BASE window, above pcdisp's Display page pool (BASE+0xE000..0xE400) (the menu reader accepts it; the canary of prompts.rs skips it).
 use super::pcext::BASE;
 use ee_oracle::mem::Mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const RANGE: std::ops::Range<u32> = BASE + 0xE000..BASE + 0xE200;
+pub const RANGE: std::ops::Range<u32> = BASE + 0xF000..BASE + 0xF200;
 /// The new button item, its record (and the zero record after it) and the page it opens.
-const QITEM: u32 = BASE + 0xE000;
-const QRECS: u32 = BASE + 0xE060;
-const QPAGE: u32 = BASE + 0xE100;
+const QITEM: u32 = BASE + 0xF000;
+const QRECS: u32 = BASE + 0xF060;
+const QPAGE: u32 = BASE + 0xF100;
 const ROOT_ID: u32 = 0x2e;
 /// The three retail records: New Game (kind 4), Load Game (kind 5), Options (kind 3).
 const RECS: [u32; 3] = [0x0004_4f2a, 0x0005_4f28, 0x0003_4ee7];

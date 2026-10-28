@@ -10,7 +10,7 @@ impl Gpu {
 		let (aspect, wfar, post_on, gfx) = (dc.aspect, dc.wfar, dc.post_on, dc.gfx);
 		let (eye, u, (water_on, strips_water, part_on, rays)) = (&dc.eye, &dc.u, (dfx.water_on, dfx.strips_water, dfx.part_on, dfx.rays));
 		let (wrec, strip_flows, river, river_groups, water_frame) = (&mut dfx.wrec, &dfx.strip_flows, &dfx.river, &dfx.river_groups, &dfx.water_frame);
-		let ((view, gi_level, rs), (mut enc, mut cuts), (sw, sh, multi)) = ((&dt.view, dt.gi_level, dt.rs), (&mut dt.enc, &mut dt.cuts), (db.sw, db.sh, &db.multi)); self.star_frame(scene, &gfx); /* [PC] the animated Gemlik star (star.rs), decided in every pass */ if !crate::retail::splitview::classic() { self.cloud_sky(enc, scene, u, &gfx); } /* [PC] Volumetric clouds: the new sky (volclouds/skymodel.rs), marched before the level pass (volclouds.rs) */ match super::volclouds::Input::new(&self.post, &gfx, u, (self.level, self.config.width, self.config.height), (cam, aspect, wfar), post_on && !self.under_flag && !self.under.active() && !scene.warp_shown && !self.ship_fight, &self.sun_rows()) { Some(c) => { self.volclouds.march(&self.device, &self.queue, enc, &c); } None => self.volclouds.idle() }
+		let ((view, gi_level, rs), (mut enc, mut cuts), (sw, sh, multi)) = ((&dt.view, dt.gi_level, dt.rs), (&mut dt.enc, &mut dt.cuts), (db.sw, db.sh, &db.multi)); self.star_frame(scene, &gfx); /* [PC] the animated Gemlik star (star.rs), decided in every pass */ let clouds_active = post_on && !self.under_flag && !self.under.active() && !scene.warp_shown && !self.ship_fight; if !crate::retail::splitview::classic() { self.cloud_sky(enc, scene, u, &gfx, clouds_active); } /* [PC] Volumetric clouds: the new sky (volclouds/skymodel.rs), marched before the level pass (volclouds.rs) */ match super::volclouds::Input::new(&self.post, &gfx, u, (self.level, self.config.width, self.config.height), (cam, aspect, wfar), clouds_active, &self.sun_rows()) { Some(c) => { self.volclouds.march(&self.device, &self.queue, enc, &c); } None => self.volclouds.idle() }
 		{
 			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some("level"),
@@ -145,7 +145,7 @@ impl Gpu {
 					rt.mask(&self.device, &self.queue, &mut enc, &self.depth, cam, aspect, (RETAIL_NEAR, wfar), f.dir, (self.config.width, self.config.height));
 				}
 				// [PC] Volumetric fog (volfog.rs): after the water pass, before bloom and the grade; not under water (its own look).
-				let fog = super::volfog::Input::new(&self.post, &self.sun, dc.sun.as_ref(), self.ocean_draws.iter().flat_map(|s| s.pos.iter().map(|p| p[2])), &gfx, u, (self.level, self.config.width, self.config.height), (cam, aspect, wfar), under_in.as_ref().is_none_or(|f| !f.flag) && !self.under.active() && !scene.warp_shown && !self.ship_fight, &self.sun_rows()); let fog = fog.map(|mut f| { f.water = water.then(|| self.waterfx.gi_mask().map(|m| m.0)).flatten(); f });
+				let fog = super::volfog::Input::new(&self.post, &self.sun, dc.sun.as_ref(), dc.fog, u, (self.level, self.config.width, self.config.height), (cam, aspect, wfar), &self.sun_rows()); let fog = fog.map(|mut f| { f.water = water.then(|| self.waterfx.gi_mask().map(|m| m.0)).flatten(); f });
 				// [PC] Ray-traced reflections (rtrefl.rs): the water traces through the level's structure with the scene's textures.
 				let rt_water = self.sun.rt.as_ref().zip(scene.tex_array.as_ref()).map(|(rt, array)| (&self.device, rt, array));
 				let (volfog, under, device, queue, depth) = (&mut self.volfog, &mut self.under, &self.device, &self.queue, &self.depth);

@@ -80,7 +80,7 @@ RAC-RS Launcher's Mods page only (upstream's in-game Mods pages, `retail/pcmods.
 Rust type implementing `plugins::Plugin` (`rac-rs/src/plugins.rs`) plus one entry in the `PLUGINS` list there. Its code may live
 anywhere (renderer, retail driver); it only asks `crate::plugins` whether it is on. New optional features should be built-in mods
 rather than new env vars or new Options rows. Do not add menu pages of our own: upstream's Mods page owns `BASE+0xC000..0xD800` and
-text ids `0x7fc0..0x8000` (our `titlequit.rs` Quit Game row uses `BASE+0xE000..0xE200`).
+text ids `0x7fc0..0x8000` (upstream's Display page `pcdisp.rs` owns `BASE+0xE000..0xE400` and text ids `0x7fb0..0x7fc0`; our `titlequit.rs` Quit Game row uses `BASE+0xF000..0xF200`).
 
 - **How it plugs into the mods system**: on first use `plugins.rs` writes `mods/<id>/omni-mod.json` for each built-in mod (format 2,
   `"type": "script"` because the launcher accepts only script / native, no scripts, `"builtin": true`; rewritten only when it
