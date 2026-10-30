@@ -365,7 +365,8 @@ fn reach() -> f32 {
 }
 
 /// The water shader's line after which the traced reflection replaces the far-air guess (waterfx/shader.rs `fs_water`).
-const WATER_HOOK: &str = "\tlet hit = reflect_ray(p + gsm * 0.02, rr, jit);\n\tvar refl = env(r, base);\n";
+/// (Since v0.4.2 the screen-space march runs only off the mirrored planes; `rt_water` skips those itself, `rt_on_mirror`.)
+const WATER_HOOK: &str = "\tif (ml < 0) { hit = reflect_ray(p + gsm * 0.02, rr, jit); }\n\tvar refl = env(r, base);\n";
 
 const RT_WATER: &str = r#"
 // [PC] Ray-traced reflections (rtrefl.rs `Water`): the pixel lies on a plane the planar mirror draws (mirror.rs), as `fs_water`
@@ -498,9 +499,10 @@ fn water_shader(src: &str, balanced: bool) -> String {
 	// RAC_RT_REFL_FORCE: the traced reflection alone, so neither the screen-space one nor the mirror's image is laid over it.
 	if force() {
 		const SSR: &str = "\tif (hit.w > 0.0) {\n\t\tlet bend";
-		const MIRROR: &str = "if (w.mirror.y > 0.5 && g.z > 0.96) {";
+		// No mirror layer: the mirror image is skipped (and the march runs, its hit then dropped by `SSR`).
+		const MIRROR: &str = "\tlet ml = mirror_layer(pf.z, g.z);\n";
 		assert!(src.contains(SSR) && src.contains(MIRROR), "rt reflections: fs_water has no screen-space / mirror lines to switch off");
-		src = src.replacen(SSR, "\tif (false) {\n\t\tlet bend", 1).replacen(MIRROR, "if (false) {", 1);
+		src = src.replacen(SSR, "\tif (false) {\n\t\tlet bend", 1).replacen(MIRROR, "\tlet ml = -1;\n", 1);
 	}
 	let decls = "@group(2) @binding(0) var sun_tlas: acceleration_structure;\n@group(2) @binding(1) var<storage, read> rt_tris: array<vec4<u32>>;\n@group(2) @binding(2) var<storage, read> rt_bits: array<u32>;\n";
 	let flag = |on: bool| if on { "1.0" } else { "0.0" };
@@ -727,11 +729,11 @@ fn rt_metal_shown(c: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
 }
 "#;
 
-/// The level shader lines where the metal faces' texel is read, the opaque `fs` and the blended `moby_rgba` (`fs_moby_a` / `_b`),
+/// The level shader lines where the metal faces' texel is read, the opaque `fs` and the blended `moby_rgb` (`fs_moby_a` / `_b`),
 /// and what they become in the metal module (the texel's colour through `rt_metal`).
 const METAL_HOOKS: [(&str, &str); 2] = [
 	("\tif (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }\n\tif (c.a < 0.25) { discard; }\n", "\tif (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }\n\tif (c.a < 0.25) { discard; }\n\tc = vec4<f32>(rt_metal(i, c.rgb), c.a);\n"),
-	("\tlet c = moby_texel(i);\n\tvar rgb = c.rgb * i.c.rgb * sun_lit(i);\n", "\tlet c = moby_texel(i);\n\tvar rgb = rt_surface(i, c.rgb) * i.c.rgb * sun_lit(i);\n"),
+	("fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {\n\tvar rgb = c.rgb * i.c.rgb * sun_lit(i);\n", "fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {\n\tvar rgb = rt_surface(i, c.rgb) * i.c.rgb * sun_lit(i);\n"),
 ];
 
 /// The level shader `src` (as the device runs it, rtshadow.rs `level`) for the metal faces: `rt_metal` on their texel. The level's
