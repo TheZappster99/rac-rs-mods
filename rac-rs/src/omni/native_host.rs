@@ -194,6 +194,29 @@ fn do_call(user: *mut c_void, number: u32, args: &[Value], want_float: bool) -> 
 		.map_err(|why| format!("game function 0x{number:x} {why}"))
 }
 
+/// [PC] A game function for a built-in mod (plugins.rs), between fields: function `number` (its NTSC number in rac1_funcs.txt, found by its
+/// code on either disc) with integer arguments in a0.. and float arguments in f12..; `sp` moves the stack pointer for the call (the caller's
+/// scratch memory lies above it). The result is v0. Same refusals as `call_game`, but no loaded mods are needed.
+pub(crate) fn call_builtin(c: &mut Cpu, number: u32, ints: &[u32], floats: &[f32], sp: Option<u32>) -> Result<u32, String> {
+	if c.stop.is_some() {
+		return Err("the game machine has stopped".into());
+	}
+	depth_check()?;
+	let (entry, _) = super::funcs::resolve(c, number, true, level_word(c))?;
+	let set = |c: &mut Cpu| {
+		for (i, &v) in ints.iter().enumerate() {
+			c.s(4 + i, v as i32 as i64 as u64);
+		}
+		for (i, &f) in floats.iter().enumerate() {
+			c.f[12 + i] = f.to_bits();
+		}
+		if let Some(sp) = sp {
+			c.s(29, sp as i32 as i64 as u64);
+		}
+	};
+	run_at(c, entry, set, |c| c.g(2) as u32).map_err(|why| format!("game function 0x{number:x} {why}"))
+}
+
 /// A `run_at` is live on the stack (`DEPTH`): it will catch what a callee unwinds with (bridge.rs `park_panic`).
 pub(super) fn calls_live() -> u32 {
 	DEPTH.load(Ordering::SeqCst)

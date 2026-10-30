@@ -69,6 +69,7 @@ mod logq;
 mod mobys;
 pub(crate) mod modset;
 mod native_host;
+pub(crate) use native_host::call_builtin;
 mod newgame;
 mod original;
 mod prescan;

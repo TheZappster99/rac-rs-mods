@@ -156,8 +156,32 @@ impl Plugin for Hoverboard {
 	}
 }
 
+/// Slam Shockwave (retail/slamwave.rs): a wrench slam that lands breaks every crate around Ratchet, as in the later games.
+struct SlamShockwave;
+
+impl Plugin for SlamShockwave {
+	fn id(&self) -> &'static str {
+		crate::retail::slamwave::ID
+	}
+	fn name(&self) -> &'static str {
+		"Slam Shockwave"
+	}
+	fn description(&self) -> &'static str {
+		"A wrench slam (jump, then Square) breaks open every crate around Ratchet when he lands, like in Up Your Arsenal. Radius sets how far it reaches. Built into the game."
+	}
+	fn env_force(&self) -> Option<&'static str> {
+		Some("RAC_SLAM_SHOCKWAVE")
+	}
+	fn settings(&self) -> &'static [Setting] {
+		&[Setting { id: "radius", name: "Radius", values: &["Small", "Medium", "Large"], default: 1 }]
+	}
+	fn pre_field(&self, m: &mut ee_oracle::Machine) {
+		crate::retail::slamwave::pre_field(m);
+	}
+}
+
 /// Every built-in mod, in menu order. A new one is a type implementing `Plugin` and one entry here.
-static PLUGINS: &[&dyn Plugin] = &[&RayTracing, &RagdollRatchet, &Hoverboard];
+static PLUGINS: &[&dyn Plugin] = &[&RayTracing, &RagdollRatchet, &Hoverboard, &SlamShockwave];
 
 // ---- state ------------------------------------------------------------------------------------------------------------------
 
