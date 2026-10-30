@@ -1,7 +1,7 @@
 //! [PC] Ragdoll Ratchet (RAGDOLL_PLAN.md), the worker half: the built-in mod `ragdoll-ratchet` (plugins.rs) and its measuring tools.
 //!
 //! The mod: a big fall that no Heli-Pack, Thruster-Pack or wrench slam broke, L3 in the air, or an enemy hit (setting `hits`)
-//! makes Ratchet go limp. Each field
+//! makes Ratchet go limp, except in the hoverboard races (`RACE_CLIPS`). Each field
 //! `pre_field` tracks the fall from RAM, runs the phases and, while he is limp, hands the game a pad with only Start and the
 //! camera stick (the game's Ratchet then lands and stands where he is). The phase reaches the renderer as `HeroParts.ragdoll`
 //! (`current`), where viewer/ragdoll.rs draws the limp body. Nothing else is written, and with the mod off nothing runs.
@@ -77,6 +77,15 @@ const GUARD_S: f32 = 3.0;
 /// soon as the get-up starts. Second test (2026-10-27): hits came every 1.7 s against his 4 health, so the 3 s locked down took
 /// two of them and he got up with 1 health; the player chose control during the get-up over a locked get-up.
 const HIT_LIMP_S: f32 = 0.5;
+
+/// The hero moby (aim.rs `HERO_MOBY`); its +0x53 is the sequence slot it plays.
+const HERO_MOBY: u32 = 0x1413d0;
+/// Ratchet's own hoverboard race clips (viewer/hoverboard.rs: ride, carves, jump, falling off). Every level but the race
+/// levels (and level 0) leaves these slots empty, so the hero playing one is riding a race. The ragdoll stays off then: the
+/// ramps are big drops and the race's crashes are retail's own (player, 2026-10-30: "it makes it really difficult").
+const RACE_CLIPS: [u8; 6] = [82, 85, 86, 97, 98, 104];
+/// The race counts on for this long after the last race clip, so a field or two in another clip (a hit) does not let a fall start.
+const RACE_HOLD_S: f32 = 1.0;
 
 /// States that end a ragdoll at once: water, mud, the Swingshot, the ship / turret and the grind.
 fn cancel_state(s: u32) -> bool {
@@ -170,6 +179,8 @@ struct Mod {
 	/// Fields this ragdoll has lain on the ground (the limp time). Not `t`: a hit's knock-back lifts the game's Ratchet off the
 	/// ground for a moment, Ground -> Fall -> Ground, and restarting the count there kept him down under every hit, guard or not.
 	down: u32,
+	/// Fields left in which he counts as in a hoverboard race (`RACE_CLIPS`): no ragdoll at all.
+	race: u32,
 	id: u32,
 	cue: Cue,
 }
@@ -228,6 +239,13 @@ pub fn pre_field(m: &mut Machine) {
 	let teleport = moved.is_some_and(|d| d.iter().any(|v| v.abs() > JUMP));
 	let vel = moved.filter(|_| !teleport).map_or([0.0; 3], |d| d.map(|v| v / dt));
 	s.last_pos = Some(pos);
+	let hero = m.rd32(HERO_MOBY) & 0x01ff_ffff;
+	let race_clip = hero != 0 && RACE_CLIPS.contains(&m.rd8(hero + 0x53));
+	let was_race = s.race > 0;
+	s.race = if race_clip { (RACE_HOLD_S / dt).round() as u32 } else { s.race.saturating_sub(1) };
+	if was_race != (s.race > 0) && log_on() {
+		eprintln!("ragdoll: hoverboard race {}", if was_race { "over" } else { "seen: ragdoll off" });
+	}
 	let old = s.phase;
 	let mut restart = false;
 
@@ -284,7 +302,7 @@ pub fn pre_field(m: &mut Machine) {
 				}
 			}
 		}
-	} else if mode != 0 || s.scene || form != 0 || health <= 0 || teleport || cancel_state(state) {
+	} else if mode != 0 || s.scene || form != 0 || health <= 0 || teleport || cancel_state(state) || s.race > 0 {
 		s.phase = Phase::Off;
 		s.air = None;
 		s.hit = None;
