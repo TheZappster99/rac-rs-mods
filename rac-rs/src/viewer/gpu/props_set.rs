@@ -168,7 +168,9 @@ impl Gpu {
 			// [PC] perf round 3: one record per slot and each distinct pose once; `vs_props` poses the static model.
 			// [PC] lane nprops: the poses are not copied to a CPU mirror: `jobs` lists them and `upload_direct` converts their
 			// sources into the upload's staging memory (RAC_PROPS_SET_OLD=1: the mirror `props_pose`, as before).
-			let old = old_path();
+			// [PC] Ray tracing (rtmovers.rs) poses the moving casters on the CPU from `props_pose` after this frame's jobs are gone,
+			// so it keeps the mirror (`rtshadow::on` is fixed once the device is made: the mode never flips within a session).
+			let old = old_path() || crate::viewer::rtshadow::on();
 			let (mut inst, mut rad) = (std::mem::take(&mut scene.props_inst), std::mem::take(&mut scene.sun_rad));
 			let (mut pose, mut jobs): (Vec<super::gpuskin::PoseEntry>, Vec<PoseJob>) = (if old { std::mem::take(&mut scene.props_pose) } else { Vec::new() }, Vec::new());
 			let total = {
