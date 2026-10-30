@@ -1,6 +1,6 @@
 # Ray-traced reflections: plan
 
-Status (2026-10-28): phases 1-5 done. Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
+Status (2026-10-30): phases 1-6 done, phase 7 half done (mirror off and 2 rays at Ultra; textured movers and glass next). Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
 the water with the picture's own lighting; `water shade` 0.50 ms with every water pixel traced and a lot of water on screen.
 Without the force switch Performance traces little (the planar mirror covers flat water on most levels). Dev switches:
 RAC_RT_REFL_SHOW=1 (tint: yellow from the picture, red shaded, blue nothing hit), RAC_RT_REFL_FORCE=1 (trace everywhere),
@@ -15,6 +15,16 @@ and glass traced"); looked at in game at Ultra and switched live with Insert (lo
 pass), so its cost is the level pass's time with and without it. The wrench head (a request, not retail: a plain textured moby,
 class 71) is built too: the hero batch's draws with the wrench's own textures (`Gpu::set_wrench_gloss`) use the metal module with
 RT_GLOSS = 1 (`rt_wrench`): bright grey texels take 75% of the chrome's share of their mirror hit. Looked at in game (looks good; Clank shines too, likely a texture he shares with the wrench). Later: a sun glint on the metal where the mirror ray misses and points at the sun.
+Phase 6 timed (2026-10-30, Novalis, RAC_GPU_PASSES=120, the same view switched with Insert): the level pass 1.84 ms at
+Performance (metal not traced) against 1.93 ms at Balanced, so the traced metal costs about 0.1 ms there.
+Phase 7 (Ultra) part 1 built and timed (2026-10-30): at Ultra the mirrored planes trace too (`rtrefl::mirrors_traced`, read in
+gpu/draw/passes.rs: no plane is picked, so the planar mirror's pass over the level is not drawn, once the traced water can run),
+and rippled water averages a second ray halfway to the full ripple normal's mirror (`rt_water`, RT_ULTRA). Same Novalis view:
+Performance sum 5.12 ms (water shade 0.19, water mirror 0.46), Balanced 5.14 (shade 0.23, mirror 0.43), Ultra 4.82 (shade
+0.33, no mirror): **Ultra is about 0.3 ms cheaper than Balanced**, as the mirror pass costs more than tracing the planes.
+Ultra's water shade at worst 0.59 ms on Novalis. Still to do for phase 7: movers textured off screen (needs the movers' vertex
+and index buffers in the water's group 2, which is near the 16 storage buffers the device asks for: pack them first), and the
+second ray on glass (the metal module cannot tell glass from chrome yet).
 
 The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
 (2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics

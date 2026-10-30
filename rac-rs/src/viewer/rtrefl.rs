@@ -123,6 +123,12 @@ pub(super) fn movers_shaded() -> bool {
 	wanted() && tracing() && quality() != Quality::Performance
 }
 
+/// Reflections at Ultra: the flat water planes trace too, so the planar mirror (mirror.rs) draws nothing and its second pass over
+/// the level is saved (gpu/draw/passes.rs, once the traced water can run). Rippled water traces a second ray (`rt_water`).
+pub(in crate::viewer) fn mirrors_traced() -> bool {
+	wanted() && tracing() && quality() == Quality::Ultra
+}
+
 /// Dev only: RAC_POST_VIEW=rtrefl shows what the camera's own view rays hit, traced and shaded as reflections will be (`Debug`).
 pub(super) fn debug_view() -> bool {
 	static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -436,10 +442,15 @@ fn rt_trace(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, dist: f32, rough: f
 // [PC] Ray-traced reflections (rtrefl.rs `Water`): the water's reflection `fallback` (the far-air guess at Performance, where it
 // runs before the screen-space reflection; the screen-space reflection over it from Balanced on, where it runs after) with the
 // traced ray `r` from `o` laid over it (`rt_trace`). It traces where no mirrored plane lies under the pixel, and at
-// Performance only where the screen-space march found nothing sure (`ssr` < 1).
-fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<f32>, gz: f32, dist: f32, jit: f32, kb: vec2<f32>) -> vec4<f32> {
+// Performance only where the screen-space march found nothing sure (`ssr` < 1). At Ultra (RT_ULTRA) the mirror draws nothing, and
+// where the ripples turn the full ripple normal's mirror ray `rn` away from `r` a second ray halfway between the two is averaged
+// in: rough water then blurs what it reflects as the ripples spread it, instead of showing one sharp image.
+fn rt_water(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, ssr: f32, pf: vec3<f32>, gz: f32, dist: f32, jit: f32, kb: vec2<f32>, rn: vec3<f32>) -> vec4<f32> {
 	if (RT_FORCE < 0.5 && ((RT_BALANCED < 0.5 && ssr > 0.99) || rt_on_mirror(pf, gz))) { return vec4<f32>(fallback, 0.0); }
-	return rt_trace(o, r, fallback, dist, 1.0, kb, jit);
+	let a = rt_trace(o, r, fallback, dist, 1.0, kb, jit);
+	if (RT_ULTRA < 0.5 || dot(r, rn) > 0.999) { return a; }
+	let r2 = normalize(r + rn);
+	return 0.5 * (a + rt_trace(o, normalize(vec3<f32>(r2.xy, max(r2.z, 0.04))), fallback, dist, 1.0, kb, 1.0 - jit));
 }
 
 // [PC] Ray-traced reflections (rtrefl.rs, Balanced and up): the gloss of lava, sludge and mud, `fallback` (their screen-space
@@ -482,13 +493,14 @@ const GLOSS_HOOKS: [(&str, &str); 3] = [
 /// The water shader `src` (waterfx/setup.rs) with `rt_water` in `fs_water`: at Performance after the far-air guess (the
 /// screen-space reflection is laid over it), from Balanced on (`balanced`) after the screen-space reflection (the trace wins
 /// where it hits), with the lava, sludge and mud gloss traced too. The structure and the alpha tables at group 2 bindings 0..2,
-/// the hit data from binding 3, the bindless texture array as group 3.
-fn water_shader(src: &str, balanced: bool) -> String {
+/// the hit data from binding 3, the bindless texture array as group 3. `ultra`: the mirrored planes trace too (the mirror draws
+/// nothing then) and rippled water takes a second ray.
+fn water_shader(src: &str, balanced: bool, ultra: bool) -> String {
 	assert!(src.contains(WATER_HOOK) && src.contains(WATER_SSR_END), "rt reflections: fs_water has no reflect_ray / env / screen-space lines to hook");
 	let mut src = match balanced {
-		false => src.replacen(WATER_HOOK, &format!("{WATER_HOOK}\trefl = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit, {WATER_KB}).rgb;\n"), 1),
+		false => src.replacen(WATER_HOOK, &format!("{WATER_HOOK}\trefl = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit, {WATER_KB}, r).rgb;\n"), 1),
 		true => {
-			let mut s = src.replacen(WATER_SSR_END, &format!("{WATER_SSR_END}\tlet rtw = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit, {WATER_KB});\n\trefl = rtw.rgb;\n\tsure = max(sure, rtw.a);\n"), 1);
+			let mut s = src.replacen(WATER_SSR_END, &format!("{WATER_SSR_END}\tlet rtw = rt_water(p + gsm * 0.02, rr, refl, hit.w, pf, g.z, dist, jit, {WATER_KB}, r);\n\trefl = rtw.rgb;\n\tsure = max(sure, rtw.a);\n"), 1);
 			for (from, to) in GLOSS_HOOKS {
 				assert!(s.contains(from), "rt reflections: the water shader has no gloss line {from:?}");
 				s = s.replacen(from, to, 1);
@@ -511,6 +523,7 @@ fn water_shader(src: &str, balanced: bool) -> String {
 		.replace("RT_SHOW", flag(show()))
 		.replace("RT_FORCE", flag(force()))
 		.replace("RT_BALANCED", flag(balanced))
+		.replace("RT_ULTRA", flag(ultra))
 		.replace("RT_STRENGTH", &format!("{:.3}", super::sunshadow::STRENGTH))
 		.replace("RT_GLINT", &format!("{:.3}", super::waterfx::GLINT));
 	format!("enable wgpu_ray_query;\nenable wgpu_binding_array;\n{src}\n{decls}{}{}{rt}", hit_wgsl(2, 3, 3), super::rtshadow::rt_fns())
@@ -586,7 +599,7 @@ impl Water {
 	}
 
 	fn make(&self, device: &wgpu::Device) -> wgpu::RenderPipeline {
-		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl water"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl water", water_shader(&self.src, movers_shaded()).into())) });
+		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt refl water"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt refl water", water_shader(&self.src, movers_shaded(), mirrors_traced()).into())) });
 		let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 			label: Some("water shade rt"),
 			layout: Some(&self.pl),
@@ -598,10 +611,11 @@ impl Water {
 			multiview_mask: None,
 			cache: None,
 		});
-		let where_ = match (force(), movers_shaded()) {
-			(true, _) => "everywhere (RAC_RT_REFL_FORCE)",
-			(false, false) => "where the screen-space reflection misses",
-			(false, true) => "off the mirrored planes, with sun shadows, moving things and the lava, sludge and mud gloss",
+		let where_ = match (force(), movers_shaded(), mirrors_traced()) {
+			(true, _, _) => "everywhere (RAC_RT_REFL_FORCE)",
+			(false, false, _) => "where the screen-space reflection misses",
+			(false, true, false) => "off the mirrored planes, with sun shadows, moving things and the lava, sludge and mud gloss",
+			(false, true, true) => "everywhere, the planar mirror off, 2 rays on ripples, with sun shadows, moving things and the lava, sludge and mud gloss",
 		};
 		eprintln!("rt reflections: water traced {where_} (reach {:.0}){}", reach(), if show() { ", traced pixels tinted (RAC_RT_REFL_SHOW)" } else { "" });
 		pipeline
@@ -855,9 +869,9 @@ mod tests {
 		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("rt refl debug wgsl validate");
 		// The traced water at Performance and from Balanced on (its hooks found, its source whole).
 		let src = super::super::waterfx::shade_source("");
-		for balanced in [false, true] {
-			let m = naga::front::wgsl::parse_str(&super::water_shader(&src, balanced)).unwrap_or_else(|e| panic!("rt refl water wgsl parse (balanced {balanced}): {e}"));
-			naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("rt refl water wgsl validate (balanced {balanced}): {e:?}"));
+		for (balanced, ultra) in [(false, false), (true, false), (true, true)] {
+			let m = naga::front::wgsl::parse_str(&super::water_shader(&src, balanced, ultra)).unwrap_or_else(|e| panic!("rt refl water wgsl parse (balanced {balanced}, ultra {ultra}): {e}"));
+			naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("rt refl water wgsl validate (balanced {balanced}, ultra {ultra}): {e:?}"));
 		}
 		// The traced chrome and glass, over the plain level shader and over the shadow receivers' one.
 		let level = super::super::volfog::soft::level_source(super::super::SHADER, false);

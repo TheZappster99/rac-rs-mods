@@ -109,7 +109,10 @@ impl Gpu {
 				cuts.cut(&self.device, &mut enc, "f_fx");
 				// [PC] The planar mirrors (mirror.rs) of the flat water planes below the eye the view looks at most: Water High up to
 				// three planes (each its own pass and layer), Medium the one, Low none (the reflection march alone, no second scene pass).
-				let picked: Vec<f32> = water_frame.as_ref().map(|f| mirror_pick(self.level, &wrec, cam.pos, &f.vp, mirror_count(gfx.water_q))).unwrap_or_default(); let mirrors = self.waterfx.steady_mirrors(picked);
+				// [PC] Ray-traced reflections at Ultra (rtrefl.rs `mirrors_traced`): the traced water covers the flat planes too, so no
+				// plane is mirrored and the mirror's pass over the level is saved, once the traced water can run (structure with hit data).
+				let traced = super::rtrefl::mirrors_traced() && self.waterfx.traces() && scene.tex_array.is_some() && self.sun.rt.as_ref().is_some_and(|rt| rt.hit().is_some());
+				let picked: Vec<f32> = water_frame.as_ref().map(|f| mirror_pick(self.level, &wrec, cam.pos, &f.vp, if traced { 0 } else { mirror_count(gfx.water_q) })).unwrap_or_default(); let mirrors = self.waterfx.steady_mirrors(picked);
 				if water_log() {
 					let planes = water_frame.as_ref().map(|f| super::mirror::view_stats(&wrec, cam.pos, super::mirror::inverse(&f.vp).as_ref())).unwrap_or_default();
 					eprintln!("water: level {} draws {} ({:?}) mirrors {:?} planes (rays of 81, height) {:?}", self.level, wrec.len(), wrec.iter().map(|w| (w.kind, w.n, w.plane.map(|b| b[0]), w.flow)).collect::<Vec<_>>(), mirrors, planes);

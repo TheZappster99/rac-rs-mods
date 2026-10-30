@@ -218,6 +218,11 @@ impl WaterFx {
 		}
 	}
 
+	/// [PC] The water has its traced shading (rtrefl.rs `Water`: Reflections on at start-up on a tracing device).
+	pub(in crate::viewer) fn traces(&self) -> bool {
+		self.rt.is_some()
+	}
+
 	/// The targets (MSAA colour, resolve layer `k`, MSAA depth) of mirror pass `k` for `Gpu::draw_mirror`; after `positions`.
 	pub(in crate::viewer) fn mirror_target(&self, k: usize) -> Option<(&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView)> {
 		self.t.as_ref().and_then(|t| Some((&t.mirror_ms, t.mirror_layers.get(k)?, &t.mirror_depth)))
