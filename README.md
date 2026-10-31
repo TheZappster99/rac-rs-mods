@@ -1,4 +1,112 @@
-# rac-rs
+# rac-rs mods
+
+New mods for **[rac-rs](https://github.com/AsobiCodes/rac-rs)**, the fan-made PC port of Ratchet & Clank (PS2, 2002) by AsobiCodes. You get
+the whole game with four extra mods built in. Each one is off until you switch it on, and you can change its settings in the
+RAC-RS Launcher.
+
+The mods are shared with AsobiCodes' permission. This is not an official rac-rs release, so please report problems with these mods
+[here](https://github.com/TheZappster99/rac-rs-mods/issues), not on the rac-rs page.
+
+## The mods
+
+### Ray tracing
+
+Uses your graphics card's ray tracing for more realistic lighting. Each effect has its own setting, so you can pick what your PC can handle.
+
+- **Shadows** (Off / On): sharper, more accurate shadows from the sun.
+- **Sun rays** (Off / On): beams of sunlight in the air. They replace the game's usual sun rays.
+- **Reflections** (Off / Performance / Balanced / Ultra): water, shiny metal and glass reflect the real level, even things off
+  screen or behind you. Performance is cheap and only fills in what the normal reflections miss. Balanced and Ultra look better
+  but cost more. Reflections are still being worked on.
+
+Needs a graphics card with ray tracing (for example NVIDIA RTX or AMD RX 6000 and newer) and the Vulkan renderer (the default).
+Also turn on Lighting **Enhanced** and **Dynamic shadows** in Pause > Options > Graphics.
+
+### Ragdoll Ratchet
+
+Ratchet goes limp and flops around when he falls from a big height without the Heli-Pack, the Thruster-Pack or a wrench slam.
+Press L3 (Left Shift) in the air to go limp whenever you like. Enemy hits can knock him down too. You get control back when he
+gets up.
+
+- **Fall height** (Low / Medium / High): how far he has to fall before he goes limp.
+- **Ragdoll button** (Off / L3): go limp on demand in the air.
+- **Limp time** (Short / Medium / Long): how long he stays down.
+- **Floppiness** (Stiff / Loose / Noodle): how floppy his body is.
+- **Bounciness** (Off / Some / Lots): how much he bounces off the ground.
+- **Enemy hits** (Off / On): enemies can knock him down.
+- **Knockdown guard** (Off / On): stops a crowd of enemies from keeping him down. A hit only knocks him down briefly, and for a
+  moment after he gets up he can't be knocked down again.
+- **Camera follow** (Off / On): the camera follows his body as he tumbles.
+- **Cutscenes** (Off / On): press L3 during a cutscene to make him flop there too. He goes back to the scene when he gets up.
+- **Impact sound** (Off / On): a thud when he hits the ground hard.
+- **Ratchet voice** (Off / On): he grunts when he lands hard.
+
+### Hoverboard
+
+Ride a hoverboard anywhere. Press Down on the d-pad (Down arrow) on the ground to hop on, and again to hop off. Push the stick to
+speed up and carve turns, let go to coast, and pull back to brake. Jump as usual.
+
+- **Board button** (Down / L3): which button hops on and off. L3 is also the ragdoll button in the air.
+- **Top speed** (Slow / Medium / Fast): how fast the board can go.
+- **Turning** (Tight / Loose): how sharply it turns.
+
+### Slam Shockwave
+
+A wrench slam (jump, then Square) breaks open every crate around Ratchet when he lands, like in Up Your Arsenal.
+
+- **Radius** (Small / Medium / Large): how far the shockwave reaches.
+
+### Also included
+
+The title screen gets a **Quit Game** option under New Game, Load Game and Options.
+
+## How to install
+
+### What you need
+
+- **Your own Ratchet & Clank disc** as an `.iso` image: **PAL / Europe v1.00** (SCES-50916) or **USA v1.00** (SCUS-97199). No game
+  files are included here. Setup builds the game from your disc.
+- **Windows 10 or 11, 64-bit**, about **5 GB of free space** and an internet connection for the first setup.
+- For Ray tracing only: a graphics card with ray tracing (see above).
+
+### Steps
+
+1. Click the green **Code** button at the top of this page and choose **Download ZIP**. Unzip it into a **new, empty folder**.
+   Don't unzip it over an existing rac-rs install.
+2. Double-click **Setup.cmd**.
+3. Click **Browse** and pick your `.iso` file. Wait for the green **Disc OK**.
+4. Leave **Install the RAC-RS Launcher** ticked. You need the launcher to switch the mods on. Then click **Install**.
+5. Wait about 15 minutes (it can take up to half an hour on an older PC). You can keep using your PC while it builds.
+6. Open the **RAC-RS Launcher** and go to the **Mods** page. Tick **Load mods**, switch on the mods you want and pick their
+   settings. Changes to mods take effect the next time you start the game.
+7. Click **Play**.
+
+Already playing rac-rs? You can copy your saves across: copy the `player` folder from your old install into the new folder.
+
+### Don't update this install
+
+The game and the launcher will offer updates when a new official rac-rs version comes out. **Click Not now.** An update installs
+the official version over this one and removes the mods. When a new version of these mods is ready, it will be posted here.
+Download it the same way, into a new folder.
+
+## For modders: how the mods are built
+
+These mods aren't script mods like Arsenal Mastery. They change the renderer, which script mods can't touch, so they're compiled
+into the game itself as "built-in mods". The launcher still lists them like any other mod.
+
+- Each mod is a type in [rac-rs/src/plugins.rs](rac-rs/src/plugins.rs) (its name, description and settings). Its code lives in
+  `rac-rs/src/retail/` (game side) and `rac-rs/src/viewer/` (picture side), for example `ragdoll.rs` in both.
+- The game writes a `mods/<id>/omni-mod.json` for each built-in mod, so the launcher shows it. On / Off and the settings are read
+  from `mods/active.txt` and `mods/settings.json` when the game starts.
+- Notes on each mod's design and progress are in `RT_SHADOWS_PLAN.md`, `RT_REFLECTIONS_PLAN.md`, `RAGDOLL_PLAN.md` and
+  `HOVERBOARD_PLAN.md`.
+- Branches: `main` holds the official rac-rs releases, unchanged. `mods-migration` holds these mods on top.
+
+Everything below is the original rac-rs README.
+
+---
+
+# About rac-rs
 
 An unofficial PC port of **Ratchet & Clank** (PlayStation 2, 2002), written in Rust. It runs the full game, start to credits, from **your own disc**.
 
