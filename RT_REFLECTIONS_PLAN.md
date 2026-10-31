@@ -1,6 +1,6 @@
 # Ray-traced reflections: plan
 
-Status (2026-10-30): phases 1-6 done, phase 7 half done (mirror off and 2 rays at Ultra; textured movers and glass next). Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
+Status (2026-10-31): phases 1-6 done, phase 7 mostly done (mirror off, 2 rays and textured movers at Ultra; glass next). Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
 the water with the picture's own lighting; `water shade` 0.50 ms with every water pixel traced and a lot of water on screen.
 Without the force switch Performance traces little (the planar mirror covers flat water on most levels). Dev switches:
 RAC_RT_REFL_SHOW=1 (tint: yellow from the picture, red shaded, blue nothing hit), RAC_RT_REFL_FORCE=1 (trace everywhere),
@@ -22,9 +22,15 @@ gpu/draw/passes.rs: no plane is picked, so the planar mirror's pass over the lev
 and rippled water averages a second ray halfway to the full ripple normal's mirror (`rt_water`, RT_ULTRA). Same Novalis view:
 Performance sum 5.12 ms (water shade 0.19, water mirror 0.46), Balanced 5.14 (shade 0.23, mirror 0.43), Ultra 4.82 (shade
 0.33, no mirror): **Ultra is about 0.3 ms cheaper than Balanced**, as the mirror pass costs more than tracing the planes.
-Ultra's water shade at worst 0.59 ms on Novalis. Still to do for phase 7: movers textured off screen (needs the movers' vertex
-and index buffers in the water's group 2, which is near the 16 storage buffers the device asks for: pack them first), and the
-second ray on glass (the metal module cannot tell glass from chrome yet).
+Ultra's water shade at worst 0.59 ms on Novalis.
+Phase 7 part 2 built (2026-10-31): at Ultra moving things hit off screen show their texture (coarse mip) instead of its mean.
+No new storage binding: a compute pass (rtmovers.rs `UV_WGSL`) copies each mover triangle's three UVs from the geometries'
+vertex buffers into the tail of the movers' texture table (`rt_mtex`) every frame, and `rt_mover_colour` reads them with the hit's
+barycentrics. Ran in game with no errors (log: "moving things textured off screen"); not yet timed.
+Glass checked on Novalis (the ship's cockpit, looked down on): Balanced and Ultra look the same, as the mirror ray goes up to the
+sky, misses the structure and keeps the env texture at every setting. Glass can be told from chrome after all: its faces use
+texture slot -3 (`GLASS_KEY`, gpu/metal.rs `push_metal`). Still to do for phase 7: glass of its own (a Fresnel weight, so it
+reflects at grazing angles and stays see-through head on, and a sky colour on a miss at Ultra), then the second ray on glass.
 
 The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
 (2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics

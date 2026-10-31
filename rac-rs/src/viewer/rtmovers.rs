@@ -11,7 +11,9 @@
 //! - Everything is opaque (no texel test) and built for speed (`PREFER_FAST_BUILD`). The shadow mask reads last frame's, so
 //!   a moving shadow lags one frame behind its caster.
 //! - For the ray-traced reflections at Balanced and up (rtrefl.rs `rt_mover_colour`): each triangle's texture slot
-//!   (`tex_table`), so a reflected mover the picture does not show gets its texture's mean colour.
+//!   (`tex_table`), so a reflected mover the picture does not show gets its texture's mean colour. At Ultra each triangle's
+//!   three uvs go in the same table too (`UV_WGSL`, filled on the GPU from the movers' own vertex buffers, as the indices
+//!   are only there), so the mover is textured: the water's shading pass has no room for more storage buffers.
 
 use super::*;
 
@@ -71,7 +73,47 @@ pub(super) struct RtMovers {
 	tex_gen: u64,
 	/// Scratch: this frame's texture table.
 	tex_scratch: Vec<u32>,
+	/// The uv pass (`UV_WGSL`) and its layout, made on first use at Ultra.
+	uv: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
 }
+
+/// The texture table's head (`tex_table`): the 4 geometries' starts, where the uvs start, the triangles, the geometries, 0.
+const HEAD: usize = 8;
+
+const UV_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read_write> tbl: array<u32>;
+@group(0) @binding(1) var<storage, read> idx: array<u32>;
+@group(0) @binding(2) var<storage, read> v0: array<f32>;
+@group(0) @binding(3) var<storage, read> v1: array<f32>;
+@group(0) @binding(4) var<storage, read> v2: array<f32>;
+@group(0) @binding(5) var<storage, read> v3: array<f32>;
+
+fn vf(g: u32, k: u32) -> f32 {
+	switch g {
+		case 0u: { return v0[k]; }
+		case 1u: { return v1[k]; }
+		case 2u: { return v2[k]; }
+		default: { return v3[k]; }
+	}
+}
+
+// [PC] Ray-traced reflections at Ultra (rtmovers.rs `tex_table`): triangle `t` of the movers' structure (compact indices 3t..3t+2,
+// in the table's order) gets its three uvs, read from its geometry's `Vertex` buffer (uv at floats 3..4 of 16), at tbl[4] + 6t.
+@compute @workgroup_size(64) fn cs_uv(@builtin(global_invocation_id) id: vec3<u32>) {
+	let t = id.y * (65535u * 64u) + id.x;
+	if (t >= tbl[5]) { return; }
+	var g = 0u;
+	for (var k = 1u; k < min(tbl[6], 4u); k++) {
+		if (t + 8u >= tbl[k]) { g = k; }
+	}
+	let base = tbl[4] + t * 6u;
+	for (var j = 0u; j < 3u; j++) {
+		let b = idx[t * 3u + j] * 16u;
+		tbl[base + j * 2u] = bitcast<u32>(vf(g, b + 3u));
+		tbl[base + j * 2u + 1u] = bitcast<u32>(vf(g, b + 4u));
+	}
+}
+"#;
 
 impl RtMovers {
 	/// Builds this frame's structure (submitted on its own, ahead of the frame's) from the scene's moving casters around
@@ -135,7 +177,7 @@ impl RtMovers {
 		}
 		if self.ibuf.as_ref().is_none_or(|b| b.1 < total as usize) {
 			let cap = (total as usize).next_power_of_two().max(1 << 16);
-			self.ibuf = Some((device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers indices"), size: (cap * 4) as u64, usage: wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), cap));
+			self.ibuf = Some((device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers indices"), size: (cap * 4) as u64, usage: wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE, mapped_at_creation: false }), cap));
 		}
 		let (Some((ibuf, _)), posed) = (&self.ibuf, &self.posed) else { return None };
 		// Pose the casting slots (the shader's own operations, gpuskin.rs `emulate_pos`) and upload each slot's range.
@@ -150,6 +192,8 @@ impl RtMovers {
 		}
 		let mut enc = device.create_command_encoder(&Default::default());
 		let mut geos: Vec<Geo> = Vec::new();
+		// Each geometry's buffer with its uvs (`UV_WGSL`): the props batch's own for the posed props.
+		let mut uv_src: Vec<&wgpu::Buffer> = Vec::new();
 		let mut at = 0u32;
 		let copy = |enc: &mut wgpu::CommandEncoder, src: &wgpu::Buffer, runs: &[(u32, u32, u32)], at: &mut u32| {
 			for &(s, n, _) in runs {
@@ -160,10 +204,12 @@ impl RtMovers {
 		if let Some((pbuf, cap)) = posed.as_ref().filter(|_| props_idx > 0) {
 			copy(&mut enc, &scene.props.ibuf, &runs, &mut at);
 			geos.push(Geo { vbuf: pbuf, stride: 12, verts: (*cap).min(nverts) as u32, first: 0, count: props_idx });
+			uv_src.push(&scene.props.vbuf);
 		}
 		for (b, r) in &whole {
 			let first = at;
 			copy(&mut enc, &b.ibuf, r, &mut at);
+			uv_src.push(&b.vbuf);
 			geos.push(Geo { vbuf: &b.vbuf, stride: std::mem::size_of::<Vertex>() as u64, verts: (b.vbuf.size() / std::mem::size_of::<Vertex>() as u64) as u32, first, count: at - first });
 		}
 		let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = geos
@@ -180,12 +226,26 @@ impl RtMovers {
 			.map(|(g, size)| wgpu::BlasTriangleGeometry { size, vertex_buffer: g.vbuf, first_vertex: 0, vertex_stride: g.stride, index_buffer: Some(ibuf), first_index: Some(g.first), transform_buffer: None, transform_buffer_offset: None })
 			.collect();
 		enc.build_acceleration_structures(std::iter::once(&wgpu::BlasBuildEntry { blas: &blas, geometry: wgpu::BlasGeometries::TriangleGeometries(geometry) }), std::iter::empty());
-		queue.submit([enc.finish()]);
 		if super::rtrefl::movers_shaded() {
-			// The geometries in the structure's order: the posed props, then the world-space batches.
+			// The geometries in the structure's order: the posed props, then the world-space batches. (Written before the submit,
+			// so the uv pass in `enc` fills the table after it.)
 			let order: Vec<&[(u32, u32, u32)]> = std::iter::once(&runs[..]).filter(|_| props_idx > 0).chain(whole.iter().map(|(_, r)| &r[..])).collect();
-			self.tex_table(device, queue, &order);
+			let textured = super::rtrefl::movers_textured();
+			tex_table(&mut self.tex, &mut self.tex_gen, &mut self.tex_scratch, device, queue, &order, textured);
+			if let (true, Some((tbl, _))) = (textured, &self.tex) {
+				let (pipeline, layout) = self.uv.get_or_insert_with(|| uv_pass(device));
+				let src: [&wgpu::Buffer; 4] = std::array::from_fn(|k| uv_src.get(k).copied().unwrap_or(ibuf));
+				let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: tbl.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: ibuf.as_entire_binding() }];
+				entries.extend(src.iter().enumerate().map(|(k, b)| wgpu::BindGroupEntry { binding: 2 + k as u32, resource: b.as_entire_binding() }));
+				let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("rt movers uvs"), layout, entries: &entries });
+				let groups = (total / 3).div_ceil(64);
+				let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rt movers uvs"), timestamp_writes: None });
+				pass.set_pipeline(pipeline);
+				pass.set_bind_group(0, &bind, &[]);
+				pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
+			}
 		}
+		queue.submit([enc.finish()]);
 		self.blas = Some(blas);
 		self.builds += 1;
 		if self.builds % LOG_EVERY == 1 {
@@ -194,31 +254,57 @@ impl RtMovers {
 		self.blas.as_ref()
 	}
 
-	/// The reflections' texture table for this frame's geometries (`geos`: each one's runs, in the compact index buffer's
-	/// order): first where each geometry's triangles start in the table (4 u32), then each triangle's texture slot. Remade
-	/// larger as needed.
-	fn tex_table(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, geos: &[&[(u32, u32, u32)]]) {
-		let t = &mut self.tex_scratch;
-		t.clear();
-		t.resize(4, 0);
-		for (k, runs) in geos.iter().take(4).enumerate() {
-			t[k] = t.len() as u32;
-			for &(_, n, tex) in runs.iter() {
-				t.extend(std::iter::repeat_n(tex, (n / 3) as usize));
-			}
-		}
-		if self.tex.as_ref().is_none_or(|b| b.1 < t.len()) {
-			let cap = t.len().next_power_of_two().max(1 << 14);
-			self.tex = Some((device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers textures"), size: (cap * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), cap));
-			self.tex_gen += 1;
-		}
-		if let Some((b, _)) = &self.tex {
-			queue.write_buffer(b, 0, bytemuck::cast_slice(t));
-		}
-	}
-
 	/// The reflections' texture table (`tex_table`) and a number that changes when its buffer is remade; None before the first.
 	pub(super) fn tex(&self) -> Option<(&wgpu::Buffer, u64)> {
 		self.tex.as_ref().map(|b| (&b.0, self.tex_gen))
+	}
+}
+
+/// The reflections' texture table (`tex`, its room in u32s, remade larger as needed, `generation` bumped then) for this frame's
+/// geometries (`geos`: each one's runs, in the compact index buffer's order): the head (`HEAD`: where each geometry's triangles
+/// start in the table, where the uvs start, the triangles, the geometries), then each triangle's texture slot, then (`uvs`, at
+/// Ultra) room for each triangle's 3 uvs, which the uv pass (`UV_WGSL`) fills on the GPU after this upload.
+fn tex_table(tex: &mut Option<(wgpu::Buffer, usize)>, generation: &mut u64, t: &mut Vec<u32>, device: &wgpu::Device, queue: &wgpu::Queue, geos: &[&[(u32, u32, u32)]], uvs: bool) {
+	t.clear();
+	t.resize(HEAD, 0);
+	for (k, runs) in geos.iter().take(4).enumerate() {
+		t[k] = t.len() as u32;
+		for &(_, n, tex) in runs.iter() {
+			t.extend(std::iter::repeat_n(tex, (n / 3) as usize));
+		}
+	}
+	let tris = t.len() - HEAD;
+	t[4] = t.len() as u32;
+	t[5] = tris as u32;
+	t[6] = geos.len().min(4) as u32;
+	let room = t.len() + if uvs { tris * 6 } else { 0 };
+	if tex.as_ref().is_none_or(|b| b.1 < room) {
+		let cap = room.next_power_of_two().max(1 << 14);
+		*tex = Some((device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers textures"), size: (cap * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), cap));
+		*generation += 1;
+	}
+	if let Some((b, _)) = tex {
+		queue.write_buffer(b, 0, bytemuck::cast_slice(t));
+	}
+}
+
+/// The uv pass (`UV_WGSL`) and its layout: the table read-write, the compact indices and the 4 geometries' vertex buffers read.
+fn uv_pass(device: &wgpu::Device) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+	let entry = |binding, read_only| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+	let entries: Vec<wgpu::BindGroupLayoutEntry> = (0..6).map(|b| entry(b, b != 0)).collect();
+	let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("rt movers uvs"), entries: &entries });
+	let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("rt movers uvs"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+	let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("rt movers uvs"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("rt movers uvs", UV_WGSL.into())) });
+	let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("rt movers uvs"), layout: Some(&pl), module: &module, entry_point: Some("cs_uv"), compilation_options: Default::default(), cache: None });
+	eprintln!("rt reflections: moving things textured off screen (their uvs copied each frame)");
+	(pipeline, layout)
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn rt_movers_uv_shader_validates() {
+		let m = naga::front::wgsl::parse_str(super::UV_WGSL).expect("rt movers uvs wgsl parse");
+		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("rt movers uvs wgsl validate");
 	}
 }

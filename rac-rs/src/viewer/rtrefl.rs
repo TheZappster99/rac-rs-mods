@@ -129,6 +129,12 @@ pub(in crate::viewer) fn mirrors_traced() -> bool {
 	wanted() && tracing() && quality() == Quality::Ultra
 }
 
+/// Reflections at Ultra: a moving thing off screen is textured (rtmovers.rs copies its triangles' uvs into the texture table each
+/// frame) instead of its texture's mean colour.
+pub(super) fn movers_textured() -> bool {
+	mirrors_traced()
+}
+
 /// Dev only: RAC_POST_VIEW=rtrefl shows what the camera's own view rays hit, traced and shaded as reflections will be (`Debug`).
 pub(super) fn debug_view() -> bool {
 	static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -144,7 +150,7 @@ fn hit_wgsl(group: u32, base: u32, tex_group: u32) -> String {
 		s += &format!("@group({group}) @binding({}) {decl};\n", base + k as u32);
 	}
 	s += &format!("@group({tex_group}) @binding(0) var texs: binding_array<texture_2d<f32>, {}>;\n@group({tex_group}) @binding(1) var samp: sampler;\n", super::bindless::TEX_CAP);
-	s + &RT_HIT.replace("TEX_LAST", &format!("{}u", super::bindless::TEX_CAP - 1))
+	s + &RT_HIT.replace("TEX_LAST", &format!("{}u", super::bindless::TEX_CAP - 1)).replace("RT_TEXTURED", if movers_textured() { "1.0" } else { "0.0" })
 }
 
 /// Bindings `hit_wgsl` takes.
@@ -161,9 +167,9 @@ fn movers_tex<'a>(rt: &'a super::rtshadow::RtShadow, none: &'a wgpu::Buffer) -> 
 	rt.movers_tex().unwrap_or((none, 0))
 }
 
-/// The stand-in movers' texture table: the 4 geometry starts, all 0.
+/// The stand-in movers' texture table: its head (rtmovers.rs `HEAD`), all 0.
 fn movers_none(device: &wgpu::Device) -> wgpu::Buffer {
-	device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers textures none"), size: 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })
+	device.create_buffer(&wgpu::BufferDescriptor { label: Some("rt movers textures none"), size: 32, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })
 }
 
 /// The hit data's layout entries for `hit_wgsl(base)`.
@@ -223,11 +229,23 @@ fn rt_hit_colour(geo: u32, prim: u32, bc: vec2<f32>, foot: f32, shadow: f32) -> 
 }
 
 // [PC] Ray-traced reflections (rtrefl.rs, Balanced and up): the colour of a moving thing a ray hit (triangle `prim` of geometry `geo`
-// of the movers' structure; rtmovers.rs `tex_table`: the geometries' starts, then each triangle's texture slot): its texture's
-// mean (the last mip) under a plain light. Their poses and lighting rig are not at hand, and a flat colour is enough for
-// something only seen in a reflection and off screen.
-fn rt_mover_colour(geo: u32, prim: u32) -> vec3<f32> {
-	let slot = min(rt_mtex[rt_mtex[min(geo, 3u)] + prim], TEX_LAST);
+// of the movers' structure, at barycentrics `bc`; rtmovers.rs `tex_table`: its head, then each triangle's texture slot, then at
+// Ultra each triangle's 3 uvs): its texture's mean (the last mip) under a plain light, or at Ultra (RT_TEXTURED) its texel at a
+// coarse mip (about 32 texels across: the posed positions are not at hand for a footprint, and a reflection of a moving thing
+// is small and soft). Their lighting rig is not at hand either.
+fn rt_mover_colour(geo: u32, prim: u32, bc: vec2<f32>) -> vec3<f32> {
+	let t = rt_mtex[min(geo, 3u)] + prim;
+	let slot = min(rt_mtex[t], TEX_LAST);
+	if (RT_TEXTURED > 0.5) {
+		let b = rt_mtex[4u] + (t - 8u) * 6u;
+		let bw = array<f32, 3>(1.0 - bc.x - bc.y, bc.x, bc.y);
+		var uv = vec2<f32>(0.0);
+		for (var k = 0u; k < 3u; k++) {
+			uv += vec2<f32>(bitcast<f32>(rt_mtex[b + k * 2u]), bitcast<f32>(rt_mtex[b + k * 2u + 1u])) * bw[k];
+		}
+		let dim = vec2<f32>(textureDimensions(texs[slot]));
+		return textureSampleLevel(texs[slot], samp, uv, max(log2(max(dim.x, dim.y)) - 5.0, 0.0)).rgb * 0.8;
+	}
 	return textureSampleLevel(texs[slot], samp, vec2<f32>(0.5), 16.0).rgb * 0.8;
 }
 "#;
@@ -426,7 +444,7 @@ fn rt_trace(o: vec3<f32>, r: vec3<f32>, fallback: vec3<f32>, dist: f32, rough: f
 			col = to_linear(rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix * rough, rt_sun_shadow(q, dist + h.t)));
 			known = 1.0;
 		} else if (RT_BALANCED > 0.5) {
-			col = to_linear(rt_mover_colour(h.geometry_index, h.primitive_index));
+			col = to_linear(rt_mover_colour(h.geometry_index, h.primitive_index, h.barycentrics));
 			known = 1.0;
 		}
 	}
@@ -701,7 +719,7 @@ fn rt_metal_hit(i: VOut) -> vec4<f32> {
 		}
 		col = rt_hit_colour(h.geometry_index, h.primitive_index, h.barycentrics, (dist + h.t) * pix, shadow);
 	} else {
-		col = rt_mover_colour(h.geometry_index, h.primitive_index);
+		col = rt_mover_colour(h.geometry_index, h.primitive_index, h.barycentrics);
 	}
 	// The level's fog over the ray's own length (the fragment's own fog over the eye's path is laid on after, as on any moby).
 	let f = clamp(u.fog.z + (h.t - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
