@@ -25,6 +25,9 @@ clash, and the d-pad (unused by retail in gameplay) became the default, L3 a cho
 Next steps (agreed with the player): get the riding right with the hotkey, then a gadget-swap option (picking a chosen gadget
 on Quick Select hands you the board), then a real Quick Select slot of its own (needs research: item ids, icon, name text).
 
+Later: Skate-style tricks (flick the right stick to ollie and flip, spins, bails into Ragdoll Ratchet), planned in
+HOVERBOARD_TRICKS_PLAN.md.
+
 ## Goals and limits
 
 - **Off = as before.** With the mod off nothing is read or written and the hero mesh is unchanged: the game stays bit-exact.
