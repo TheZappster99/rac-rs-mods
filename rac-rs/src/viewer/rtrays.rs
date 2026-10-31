@@ -179,7 +179,7 @@ impl RtRays {
 	/// the composite. `rt` is the level's structure (built), `cam` / `aspect` the level pass's camera, `f` the frame's key light,
 	/// `col` its colour, `level` the Graphics Sun rays level.
 	#[allow(clippy::too_many_arguments)]
-	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, rt: &super::rtshadow::RtShadow, post: &super::post::Post, cam: &Camera, aspect: f32, f: &super::sunshadow::SunFrame, col: [f32; 3], level: u8) {
+	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &super::presenter::GatedQueue, enc: &mut wgpu::CommandEncoder, rt: &super::rtshadow::RtShadow, post: &super::post::Post, cam: &Camera, aspect: f32, f: &super::sunshadow::SunFrame, col: [f32; 3], level: u8) {
 		let Some((lin, rays, generation)) = post.rays_io() else { return };
 		let _s = super::profile::span("rt_rays");
 		let (w, h) = (lin.texture().width(), lin.texture().height());

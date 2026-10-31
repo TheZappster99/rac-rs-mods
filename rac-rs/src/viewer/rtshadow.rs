@@ -630,7 +630,7 @@ impl RtShadow {
 	/// travel direction, `size` the target's): traced into the mask, whose camera the next frame's level shaders then read.
 	/// A window past `MASK_CAP` traces in the fragment shaders instead.
 	#[allow(clippy::too_many_arguments)]
-	pub(super) fn mask(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, cam: &Camera, aspect: f32, range: (f32, f32), dir: [f32; 3], size: (u32, u32)) {
+	pub(super) fn mask(&mut self, device: &wgpu::Device, queue: &super::presenter::GatedQueue, enc: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, cam: &Camera, aspect: f32, range: (f32, f32), dir: [f32; 3], size: (u32, u32)) {
 		if self.blas.is_none() || (size.0 as usize) * (size.1 as usize) > MASK_CAP {
 			// No mask (eye.w 0), but a built structure still traces in the fragment shaders (sun.w).
 			let v = RtView { sun: [0.0, 0.0, 0.0, self.built() as u8 as f32], ..RtView::zeroed() };

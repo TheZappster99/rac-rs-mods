@@ -345,7 +345,7 @@ impl Debug {
 	/// After the sun rays and before the composite: the view rays of `cam` / `aspect` into post.rs's rays target. Nothing until the
 	/// level's structure has hit data; `array` is the scene's bindless texture group.
 	#[allow(clippy::too_many_arguments)]
-	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, rt: &super::rtshadow::RtShadow, post: &super::post::Post, cam: &Camera, aspect: f32, array: &wgpu::BindGroup) {
+	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &super::presenter::GatedQueue, enc: &mut wgpu::CommandEncoder, rt: &super::rtshadow::RtShadow, post: &super::post::Post, cam: &Camera, aspect: f32, array: &wgpu::BindGroup) {
 		let (Some((_, rays, post_gen)), Some((hit, hit_gen))) = (post.rays_io(), rt.hit()) else { return };
 		let (w, h) = (rays[1].texture().width(), rays[1].texture().height());
 		let fw = forward(cam);
@@ -802,10 +802,15 @@ fn metal_shader(src: &str, height: f32) -> String {
 		assert!(src.contains(from), "rt reflections: the level shader has no metal texel line {from:?}");
 		src = src.replacen(from, to, 1);
 	}
-	// The blended faces' coverage (`rt_alpha`: the glass's), in `fs_moby_a` and `fs_moby_b`.
+	// The blended faces' coverage (`rt_alpha`: the glass's), in `fs_moby_a` and `fs_moby_b` only: v0.4.3's additive pair
+	// (gpu/moby_add.rs, appended to the level shader) ends with the same line, but the metal pipelines never draw through it.
 	const ALPHA: &str = "return vec4<f32>(moby_rgb(i, c), ra);";
-	assert_eq!(src.matches(ALPHA).count(), 2, "rt reflections: the level shader's blended moby returns changed");
-	let src = src.replace(ALPHA, "return vec4<f32>(moby_rgb(i, c), rt_alpha(i, ra));");
+	for entry in ["@fragment fn fs_moby_a(", "@fragment fn fs_moby_b("] {
+		let at = src.find(entry).unwrap_or_else(|| panic!("rt reflections: the level shader has no {entry:?}"));
+		let ret = at + src[at..].find(ALPHA).expect("rt reflections: the level shader's blended moby returns changed");
+		assert!(!src[at + entry.len()..ret].contains("@fragment"), "rt reflections: the level shader's blended moby returns changed");
+		src.replace_range(ret..ret + ALPHA.len(), "return vec4<f32>(moby_rgb(i, c), rt_alpha(i, ra));");
+	}
 	let flag = |on: bool| if on { "1.0" } else { "0.0" };
 	let rt = RT_METAL
 		.replace("RT_REACH", &format!("{:.1}", reach()))

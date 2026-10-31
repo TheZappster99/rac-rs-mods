@@ -36,8 +36,8 @@ impl Gpu {
 		// [PC] Ray-traced shadows (rtshadow.rs): the level's structure is built (which the ray-traced sun rays also trace through)
 		// and the frame's mobies, the player and the debris cast too (rtmovers.rs); the receivers trace once it is built.
 		if let (Some(_), Some(rt)) = (&sun, &mut self.sun.rt) {
-			rt.ready(&self.device, &self.queue, scene);
-			rt.movers(&self.device, &self.queue, scene, cam.pos);
+			rt.ready(&self.device, self.queue.sync(), scene); // [PC] submits its own builds: the synced queue (presenter.rs `GatedQueue`)
+			rt.movers(&self.device, self.queue.sync(), scene, cam.pos);
 		}
 		// [PC] Enhanced flag for the shaders (`crisp_leaf`).
 		u.sun_texel[3] = if post_on { 1.0 } else { 0.0 };
