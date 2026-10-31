@@ -201,7 +201,7 @@ impl Gpu {
 				}
 				for d in &batch.draws {
 					match metal_rt {
-						Some((m, ..)) => pass.set_pipeline(&m.opaque[d.cull as usize]),
+						Some((m, ..)) => pass.set_pipeline(m.opaque_for(d)),
 						None => pass.set_pipeline(if d.cull != 0 { &self.pipeline_cull[d.cull as usize - 1] } else { &self.pipeline }),
 					}
 					pass.set_bind_group(1, &tex[d.texture], &[]);

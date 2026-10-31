@@ -1,6 +1,6 @@
 # Ray-traced reflections: plan
 
-Status (2026-10-31): phases 1-6 done, phase 7 mostly done (mirror off, 2 rays and textured movers at Ultra; glass next). Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
+Status (2026-10-31): phases 1-6 done, phase 7 mostly done (mirror off, 2 rays and textured movers at Ultra, glass of its own; the ship canopy overlay next). Phase 4 checked on Pokitaru (RAC_RT_REFL_FORCE=1): the shopkeeper and the island show in
 the water with the picture's own lighting; `water shade` 0.50 ms with every water pixel traced and a lot of water on screen.
 Without the force switch Performance traces little (the planar mirror covers flat water on most levels). Dev switches:
 RAC_RT_REFL_SHOW=1 (tint: yellow from the picture, red shaded, blue nothing hit), RAC_RT_REFL_FORCE=1 (trace everywhere),
@@ -29,8 +29,14 @@ vertex buffers into the tail of the movers' texture table (`rt_mtex`) every fram
 barycentrics. Ran in game with no errors (log: "moving things textured off screen"); not yet timed.
 Glass checked on Novalis (the ship's cockpit, looked down on): Balanced and Ultra look the same, as the mirror ray goes up to the
 sky, misses the structure and keeps the env texture at every setting. Glass can be told from chrome after all: its faces use
-texture slot -3 (`GLASS_KEY`, gpu/metal.rs `push_metal`). Still to do for phase 7: glass of its own (a Fresnel weight, so it
-reflects at grazing angles and stays see-through head on, and a sky colour on a miss at Ultra), then the second ray on glass.
+texture slot -3 (`GLASS_KEY`, gpu/metal.rs `push_metal`).
+Phase 7 part 3 built (2026-10-31): the metal module's glass draws (texture 1) take their own pipelines (RT_GLOSS = 2): their
+blended coverage follows a Fresnel weight (`rt_alpha`: clearer head on, more reflective edge on, RT_MIX of the change) and at
+Ultra a miss mixes half the level's fog colour over the env picture. Ran at Balanced and Ultra with no errors (GPU sum 3.3-3.7
+ms on Novalis), not yet seen on a glass prop. The ship's canopy does NOT go through it: its shine is the ship class's own
+env-mapped quad overlay (fx texture 0x15, retail/queue_story.rs `cutscene_gloss`, `ship_gloss`, drawn as world quads), so Balanced
+and Ultra still look the same there (user check). Next for phase 7: a traced world-quad pipeline for that overlay (normal from the
+quad's derivatives), then the second ray on glass.
 
 The **Reflections** setting of the **Ray tracing** built-in mod (`ray-tracing`), next to its Shadows and Sun rays settings
 (2026-10-28: the three ray-traced mods became one, each a setting). It uses the same level structure (`rtshadow.rs`), so it needs Vulkan and a graphics

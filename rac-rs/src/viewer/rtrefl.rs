@@ -682,8 +682,28 @@ fn wrench_mix() -> f32 {
 }
 
 const RT_METAL: &str = r#"
-// [PC] Ray-traced reflections (rtrefl.rs `Metal`): 0 for the chrome and glass, 1 for the wrench's gloss (the pipelines' constant).
+// [PC] Ray-traced reflections (rtrefl.rs `Metal`): 0 for the chrome, 1 for the wrench's gloss, 2 for the glass (the pipelines'
+// constant).
 override RT_GLOSS: f32 = 0.0;
+
+fn rt_is_glass() -> bool { return RT_GLOSS > 1.5; }
+
+// How edge on the eye sees the face (Schlick's curve without its floor): 0 facing the eye, 1 edge on. Real glass reflects little
+// head on and most at a grazing angle.
+fn rt_glass_edge(i: VOut) -> f32 {
+	let ln = length(i.n);
+	if (ln < 1e-4) { return 0.0; }
+	let c = abs(dot(i.n / ln, normalize(u.eye.xyz - i.w)));
+	return pow(1.0 - c, 5.0);
+}
+
+// The blended metal faces' coverage. The glass lets more of what is behind it through head on and reflects more edge on; RT_MIX of
+// that change, so Balanced stays nearer the PS2's look.
+fn rt_alpha(i: VOut, a: f32) -> f32 {
+	if (!rt_is_glass()) { return a; }
+	let k = mix(0.55, 1.6, rt_glass_edge(i));
+	return clamp(a * mix(1.0, k, RT_MIX), 0.0, 1.0);
+}
 
 // [PC] Ray-traced reflections (rtrefl.rs `Metal`, Balanced and up): what the fragment's mirror ray sees, (colour, how much of it
 // holds; 0 for a miss). One ray along the mirror of the view finds what the surface really faces: the static world shaded as
@@ -727,10 +747,14 @@ fn rt_metal_hit(i: VOut) -> vec4<f32> {
 }
 
 // Chrome and glass (the metal packets, NOV-35b): `env` is the retail environment texel (the PS2's fake chrome / glass picture); a
-// hit takes RT_MIX of it, a miss keeps it.
+// hit takes RT_MIX of it, a miss keeps it. At Ultra glass that faces the open sky takes the level's fog colour (the sky's far
+// colour; the structure has no sky) over half of its env picture, so it shows the level's sky rather than the PS2's fixed one.
 fn rt_metal(i: VOut, env: vec3<f32>) -> vec3<f32> {
 	let h = rt_metal_hit(i);
-	if (h.a <= 0.0) { return rt_metal_shown(env, vec3<f32>(0.0, 0.2, 1.0)); }
+	if (h.a <= 0.0) {
+		if (rt_is_glass() && RT_MIX > 0.99) { return rt_metal_shown(mix(env, u.fog_colour.rgb, 0.5), vec3<f32>(0.0, 0.2, 1.0)); }
+		return rt_metal_shown(env, vec3<f32>(0.0, 0.2, 1.0));
+	}
 	return rt_metal_shown(mix(env, h.rgb, RT_MIX * h.a), vec3<f32>(1.0, 0.1, 0.0));
 }
 
@@ -751,7 +775,7 @@ fn rt_wrench(i: VOut, c: vec3<f32>) -> vec3<f32> {
 
 // The texel of a surface the metal module draws: the chrome and glass, or the wrench (RT_GLOSS).
 fn rt_surface(i: VOut, c: vec3<f32>) -> vec3<f32> {
-	if (RT_GLOSS > 0.5) { return rt_wrench(i, c); }
+	if (RT_GLOSS > 0.5 && RT_GLOSS < 1.5) { return rt_wrench(i, c); }
 	return rt_metal(i, c);
 }
 
@@ -778,6 +802,10 @@ fn metal_shader(src: &str, height: f32) -> String {
 		assert!(src.contains(from), "rt reflections: the level shader has no metal texel line {from:?}");
 		src = src.replacen(from, to, 1);
 	}
+	// The blended faces' coverage (`rt_alpha`: the glass's), in `fs_moby_a` and `fs_moby_b`.
+	const ALPHA: &str = "return vec4<f32>(moby_rgb(i, c), ra);";
+	assert_eq!(src.matches(ALPHA).count(), 2, "rt reflections: the level shader's blended moby returns changed");
+	let src = src.replace(ALPHA, "return vec4<f32>(moby_rgb(i, c), rt_alpha(i, ra));");
 	let flag = |on: bool| if on { "1.0" } else { "0.0" };
 	let rt = RT_METAL
 		.replace("RT_REACH", &format!("{:.1}", reach()))
@@ -818,6 +846,21 @@ pub(super) struct MetalPipelines {
 	pub blend: [wgpu::RenderPipeline; 2],
 	/// The held wrench's opaque draws (`rt_wrench`; the opaque states, as `opaque`).
 	pub gloss: [wgpu::RenderPipeline; 3],
+	/// The glass faces (gpu/metal.rs texture 1): `opaque` and `blend` with RT_GLOSS = 2.
+	pub glass: [wgpu::RenderPipeline; 3],
+	pub glass_blend: [wgpu::RenderPipeline; 2],
+}
+
+impl MetalPipelines {
+	/// The opaque pipeline for a metal draw: the glass's for texture 1.
+	pub(super) fn opaque_for(&self, d: &super::Draw) -> &wgpu::RenderPipeline {
+		if d.texture == 1 { &self.glass[d.cull as usize] } else { &self.opaque[d.cull as usize] }
+	}
+
+	/// The ABE pipeline `k` for a metal draw: the glass's for texture 1.
+	pub(super) fn blend_for(&self, k: usize, d: &super::Draw) -> &wgpu::RenderPipeline {
+		if d.texture == 1 { &self.glass_blend[k] } else { &self.blend[k] }
+	}
 }
 
 impl Metal {
@@ -867,10 +910,13 @@ impl Metal {
 		let culls = [None, Some(wgpu::Face::Back), Some(wgpu::Face::Front)];
 		let opaque = culls.map(|c| make("fs", None, true, z, c, 0.0));
 		let ab = Some(wgpu::BlendState::ALPHA_BLENDING);
-		let blend = [make("fs_moby_a", ab, true, wgpu::CompareFunction::LessEqual, None, 0.0), make("fs_moby_b", ab, false, wgpu::CompareFunction::LessEqual, None, 0.0)];
+		let blends = |gloss| [make("fs_moby_a", ab, true, wgpu::CompareFunction::LessEqual, None, gloss), make("fs_moby_b", ab, false, wgpu::CompareFunction::LessEqual, None, gloss)];
+		let blend = blends(0.0);
 		let gloss = culls.map(|c| make("fs", None, true, z, c, 1.0));
-		eprintln!("rt reflections: chrome and glass traced ({:.0}% over the env texture, the wrench's steel {:.0}%, reach {:.0})", metal_mix() * 100.0, wrench_mix() * 100.0, reach());
-		MetalPipelines { opaque, blend, gloss }
+		let glass = culls.map(|c| make("fs", None, true, z, c, 2.0));
+		let glass_blend = blends(2.0);
+		eprintln!("rt reflections: chrome and glass traced ({:.0}% over the env texture, the wrench's steel {:.0}%, reach {:.0}; glass clearer head on{})", metal_mix() * 100.0, wrench_mix() * 100.0, reach(), if metal_mix() > 0.99 { ", the level's sky colour on a miss" } else { "" });
+		MetalPipelines { opaque, blend, gloss, glass, glass_blend }
 	}
 
 	/// Group 2 for the level's structure `rt`, or None until it has hit data (the metal then draws as before).

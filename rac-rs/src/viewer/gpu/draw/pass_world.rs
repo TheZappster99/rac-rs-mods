@@ -222,8 +222,12 @@ impl Gpu {
 				pass.set_bind_group(3, *a, &[]);
 			}
 			for (k, pipeline) in self.moby_pipelines.iter().enumerate() {
-				pass.set_pipeline(metal_rt.map_or(pipeline, |(m, ..)| &m.blend[k]));
+				pass.set_pipeline(pipeline);
 				for d in &batch.draws {
+					// The traced chrome and glass each have their own pipelines.
+					if let Some((m, ..)) = metal_rt {
+						pass.set_pipeline(m.blend_for(k, d));
+					}
 					pass.set_bind_group(1, &tex[d.texture], &[]);
 					pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
 				}
